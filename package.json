@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "A self-hostable workspace for reviewing, summarizing, and continuing agent coding sessions. Import threads from Claude Code / Codex / paste, promote insights, and keep chatting grounded in your own prior context.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "keywords": [
     "nextjs",
     "react",
