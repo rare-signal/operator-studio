@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Download,
   Eye,
+  HelpCircle,
   LayoutDashboard,
   Search,
   Sparkles,
@@ -377,6 +378,15 @@ function OperatorStudioSidebar({
 
       <SidebarFooter>
         <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname === "/operator-studio/docs"}
+              onClick={() => router.push("/operator-studio/docs")}
+            >
+              <HelpCircle className="size-4" />
+              Help
+            </SidebarMenuButton>
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <div className="flex items-center gap-1">
               <DropdownMenu>
