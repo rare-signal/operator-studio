@@ -82,6 +82,13 @@ const SECTIONS: Section[] = [
           thread's messages and summaries; continuation chat sessions are
           operator-scoped and are not copied.
         </p>
+        <p>
+          Both actions are surfaced on the thread detail page via the{" "}
+          <strong>Copy…</strong> dropdown in the header. The copy is always
+          additive — the original thread stays intact in its source
+          workspace, and provenance chips on the copied thread link back to
+          the source.
+        </p>
       </>
     ),
   },
@@ -228,6 +235,20 @@ const SECTIONS: Section[] = [
           UI continues to use the session cookie. In fully-open local dev
           (no password gate, no ingest token) the endpoint accepts
           unauthenticated POSTs.
+        </p>
+        <p>
+          For per-user tokens (preferred for teams), mint them from the{" "}
+          <Link
+            href="/operator-studio/admin"
+            className="underline"
+          >
+            Admin page
+          </Link>
+          . Each token carries its own display name so imports are correctly
+          attributed, and tokens can be scoped to a single workspace or
+          left global. The plaintext is shown once on creation — copy it
+          out of the reveal card and into your shell rc, IDE hook, or CI
+          secret store.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">

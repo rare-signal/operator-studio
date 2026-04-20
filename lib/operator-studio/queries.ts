@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull } from "drizzle-orm"
+import { and, desc, eq, isNotNull, sql } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
 import {
@@ -765,4 +765,226 @@ export async function getDashboardStats(
     imported,
     recentImportRuns: runs.length,
   }
+}
+
+// ─── Full-text search (tsvector / GIN) ──────────────────────────────────────
+
+export type SearchThreadHit = OperatorThread & {
+  rank: number
+  snippet: string | null
+}
+
+export type SearchMessageHit = OperatorThreadMessage & {
+  rank: number
+  snippet: string
+  threadTitle: string | null
+  threadId: string
+}
+
+/**
+ * Thread full-text search. Uses the `search_tsv` generated column on
+ * `operator_threads` (weighted across promoted/raw title, summaries,
+ * why-it-matters, project slug). Ranks via `ts_rank_cd`, snippets via
+ * `ts_headline` with `<mark>` delimiters.
+ */
+export async function searchThreads(
+  workspaceId: string,
+  query: string,
+  limit = 30
+): Promise<SearchThreadHit[]> {
+  const q = query.trim()
+  if (q.length === 0) return []
+  const cappedLimit = Math.max(1, Math.min(limit, 100))
+
+  const db = getDb()
+  const result = await db.execute<{
+    id: string
+    workspace_id: string
+    source_app: string
+    source_thread_key: string | null
+    source_locator: string | null
+    imported_by: string
+    imported_at: Date
+    import_run_id: string | null
+    raw_title: string | null
+    raw_summary: string | null
+    promoted_title: string | null
+    promoted_summary: string | null
+    privacy_state: string
+    review_state: string
+    tags: string[] | null
+    project_slug: string | null
+    owner_name: string | null
+    why_it_matters: string | null
+    parent_thread_id: string | null
+    promoted_from_id: string | null
+    pulled_from_id: string | null
+    visible_in_studio: number
+    message_count: number
+    archived_at: Date | null
+    created_at: Date
+    updated_at: Date
+    rank: number
+    snippet: string | null
+  }>(sql`
+    SELECT
+      t.id,
+      t.workspace_id,
+      t.source_app,
+      t.source_thread_key,
+      t.source_locator,
+      t.imported_by,
+      t.imported_at,
+      t.import_run_id,
+      t.raw_title,
+      t.raw_summary,
+      t.promoted_title,
+      t.promoted_summary,
+      t.privacy_state,
+      t.review_state,
+      t.tags,
+      t.project_slug,
+      t.owner_name,
+      t.why_it_matters,
+      t.parent_thread_id,
+      t.promoted_from_id,
+      t.pulled_from_id,
+      t.visible_in_studio,
+      t.message_count,
+      t.archived_at,
+      t.created_at,
+      t.updated_at,
+      ts_rank_cd(t.search_tsv, query) AS rank,
+      ts_headline(
+        'english',
+        coalesce(
+          t.promoted_summary,
+          t.raw_summary,
+          t.why_it_matters,
+          t.promoted_title,
+          t.raw_title,
+          ''
+        ),
+        query,
+        'MaxFragments=2, MaxWords=20, MinWords=5, StartSel=<mark>, StopSel=</mark>'
+      ) AS snippet
+    FROM operator_threads t, plainto_tsquery('english', ${q}) query
+    WHERE t.workspace_id = ${workspaceId}
+      AND t.visible_in_studio = 1
+      AND t.search_tsv @@ query
+    ORDER BY rank DESC, t.imported_at DESC
+    LIMIT ${cappedLimit}
+  `)
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    sourceApp: row.source_app as OperatorSourceApp,
+    sourceThreadKey: row.source_thread_key,
+    sourceLocator: row.source_locator,
+    importedBy: row.imported_by,
+    importedAt: new Date(row.imported_at).toISOString(),
+    importRunId: row.import_run_id,
+    rawTitle: row.raw_title,
+    rawSummary: row.raw_summary,
+    promotedTitle: row.promoted_title,
+    promotedSummary: row.promoted_summary,
+    privacyState: row.privacy_state as "private" | "team",
+    reviewState: row.review_state as OperatorReviewState,
+    tags: (row.tags as string[] | null) ?? [],
+    projectSlug: row.project_slug,
+    ownerName: row.owner_name,
+    whyItMatters: row.why_it_matters,
+    parentThreadId: row.parent_thread_id,
+    promotedFromId: row.promoted_from_id,
+    pulledFromId: row.pulled_from_id,
+    visibleInStudio: row.visible_in_studio === 1,
+    messageCount: row.message_count,
+    archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+    rank: Number(row.rank) || 0,
+    snippet: row.snippet,
+  }))
+}
+
+/**
+ * Thread-message full-text search. Joins back to the parent thread so results
+ * can show the thread title they belong to. Highlights the `content` field
+ * with `<mark>` delimiters via `ts_headline`.
+ */
+export async function searchMessages(
+  workspaceId: string,
+  query: string,
+  limit = 30
+): Promise<SearchMessageHit[]> {
+  const q = query.trim()
+  if (q.length === 0) return []
+  const cappedLimit = Math.max(1, Math.min(limit, 100))
+
+  const db = getDb()
+  const result = await db.execute<{
+    id: string
+    thread_id: string
+    role: string
+    content: string
+    turn_index: number
+    metadata_json: Record<string, unknown> | null
+    promoted_at: Date | null
+    promoted_by: string | null
+    promotion_note: string | null
+    promotion_kind: string | null
+    created_at: Date
+    thread_title: string | null
+    raw_title: string | null
+    rank: number
+    snippet: string
+  }>(sql`
+    SELECT
+      m.id,
+      m.thread_id,
+      m.role,
+      m.content,
+      m.turn_index,
+      m.metadata_json,
+      m.promoted_at,
+      m.promoted_by,
+      m.promotion_note,
+      m.promotion_kind,
+      m.created_at,
+      t.promoted_title AS thread_title,
+      t.raw_title AS raw_title,
+      ts_rank_cd(m.search_tsv, query) AS rank,
+      ts_headline(
+        'english',
+        m.content,
+        query,
+        'MaxFragments=2, MaxWords=20, MinWords=5, StartSel=<mark>, StopSel=</mark>'
+      ) AS snippet
+    FROM operator_thread_messages m
+    INNER JOIN operator_threads t ON t.id = m.thread_id
+    , plainto_tsquery('english', ${q}) query
+    WHERE m.workspace_id = ${workspaceId}
+      AND t.visible_in_studio = 1
+      AND m.search_tsv @@ query
+    ORDER BY rank DESC, m.created_at DESC
+    LIMIT ${cappedLimit}
+  `)
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    threadId: row.thread_id,
+    role: row.role as OperatorThreadMessage["role"],
+    content: row.content,
+    turnIndex: row.turn_index,
+    metadataJson: row.metadata_json,
+    promotedAt: row.promoted_at ? new Date(row.promoted_at).toISOString() : null,
+    promotedBy: row.promoted_by,
+    promotionNote: row.promotion_note,
+    promotionKind: row.promotion_kind as OperatorThreadMessage["promotionKind"],
+    createdAt: new Date(row.created_at).toISOString(),
+    threadTitle: row.thread_title ?? row.raw_title,
+    rank: Number(row.rank) || 0,
+    snippet: row.snippet,
+  }))
 }

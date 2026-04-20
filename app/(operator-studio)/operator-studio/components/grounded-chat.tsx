@@ -72,9 +72,25 @@ export function GroundedChat({
   const [sending, setSending] = React.useState(false)
   const [editingIdx, setEditingIdx] = React.useState<number | null>(null)
   const [editText, setEditText] = React.useState("")
+  // Streaming state: while a response is coming in over SSE we stash the
+  // in-flight assistant text + the branch it belongs to so it renders as a
+  // normal assistant bubble without touching the persisted `branches` tree
+  // until the `done` frame arrives.
+  const [streamingText, setStreamingText] = React.useState("")
+  const [streamingBranchId, setStreamingBranchId] = React.useState<string | null>(null)
+  const [streamSlow, setStreamSlow] = React.useState(false)
+  const [streamError, setStreamError] = React.useState<string | null>(null)
   const scrollRef = React.useRef<HTMLDivElement>(null)
   const textareaRef = React.useRef<HTMLTextAreaElement>(null)
   const editRef = React.useRef<HTMLTextAreaElement>(null)
+  const abortRef = React.useRef<AbortController | null>(null)
+
+  // Clean up any in-flight stream on unmount.
+  React.useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
 
   /* ---------------------------------------------------------------- */
   /*  Derived: build the visible timeline from the branch tree        */
@@ -138,12 +154,12 @@ export function GroundedChat({
 
   const leafBranch = branches.find((b) => b.id === leafBranchId)!
 
-  // Auto-scroll on new messages
+  // Auto-scroll on new messages and on streaming growth.
   React.useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [visibleMessages.length])
+  }, [visibleMessages.length, streamingText])
 
   React.useEffect(() => {
     if (editingIdx !== null) editRef.current?.focus()
@@ -160,7 +176,16 @@ export function GroundedChat({
     const branch = branches.find((b) => b.id === targetBranchId)
     if (!branch) return
 
+    // Abort any previous in-flight stream before starting a new one.
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setSending(true)
+    setStreamingText("")
+    setStreamingBranchId(targetBranchId)
+    setStreamSlow(false)
+    setStreamError(null)
 
     // Optimistic user message
     const tempMsg: ChatMessage = {
@@ -177,38 +202,17 @@ export function GroundedChat({
       )
     )
 
-    try {
-      const res = await fetch("/api/operator-studio/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: branch.sessionId,
-          threadId,
-          message: text,
-          operatorName: reviewer ?? "operator",
-        }),
-      })
-      const data = await res.json()
+    // "Taking longer than usual" hint after 45s without a first delta.
+    let sawFirstDelta = false
+    const slowTimer = window.setTimeout(() => {
+      if (!sawFirstDelta) setStreamSlow(true)
+    }, 45_000)
 
-      setBranches((prev) =>
-        prev.map((b) => {
-          if (b.id !== targetBranchId) return b
-          const updatedMessages = data.message
-            ? [...b.messages, data.message]
-            : b.messages
-          return {
-            ...b,
-            sessionId: data.sessionId ?? b.sessionId,
-            messages: updatedMessages,
-          }
-        })
-      )
-    } catch {
+    const finalizeWithFallback = (errorMsg: string) => {
       const errMsg: ChatMessage = {
         id: `err-${Date.now()}`,
         role: "assistant",
-        content:
-          "Failed to reach the continuation engine. Check that the local cluster is running.",
+        content: errorMsg,
         createdAt: new Date().toISOString(),
       }
       setBranches((prev) =>
@@ -218,8 +222,129 @@ export function GroundedChat({
             : b
         )
       )
+    }
+
+    try {
+      const res = await fetch("/api/operator-studio/chat?stream=1", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          sessionId: branch.sessionId,
+          threadId,
+          message: text,
+          operatorName: reviewer ?? "operator",
+        }),
+        signal: controller.signal,
+      })
+
+      if (!res.ok || !res.body) {
+        throw new Error(
+          `Chat endpoint returned ${res.status} ${res.statusText}`
+        )
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let receivedDone = false
+      let accumulated = ""
+      let finalMessage: ChatMessage | null = null
+      let finalSessionId: string | null = null
+
+      readLoop: while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        let sepIdx: number
+        while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+          const rawFrame = buffer.slice(0, sepIdx)
+          buffer = buffer.slice(sepIdx + 2)
+
+          let eventName = "message"
+          const dataLines: string[] = []
+          for (const line of rawFrame.split("\n")) {
+            if (line.startsWith("event:")) {
+              eventName = line.slice(6).trim()
+            } else if (line.startsWith("data:")) {
+              dataLines.push(line.slice(5).trimStart())
+            }
+          }
+          if (dataLines.length === 0) continue
+          const payload = dataLines.join("\n")
+          let parsed: unknown
+          try {
+            parsed = JSON.parse(payload)
+          } catch {
+            continue
+          }
+
+          if (eventName === "start") {
+            const p = parsed as { sessionId?: string }
+            if (p.sessionId) finalSessionId = p.sessionId
+          } else if (eventName === "delta") {
+            const p = parsed as { content?: string }
+            if (typeof p.content === "string" && p.content.length > 0) {
+              if (!sawFirstDelta) {
+                sawFirstDelta = true
+                setStreamSlow(false)
+              }
+              accumulated += p.content
+              setStreamingText(accumulated)
+            }
+          } else if (eventName === "error") {
+            const p = parsed as { error?: string }
+            setStreamError(p.error ?? "Stream error")
+          } else if (eventName === "done") {
+            const p = parsed as { message?: ChatMessage }
+            if (p.message) finalMessage = p.message
+            receivedDone = true
+            break readLoop
+          }
+        }
+      }
+
+      if (!receivedDone && !finalMessage) {
+        throw new Error("Stream ended before done frame arrived.")
+      }
+
+      // Commit the streamed assistant message to the branch. Prefer the
+      // server-saved row (real DB id) so downstream promotion paths work.
+      const committed: ChatMessage = finalMessage ?? {
+        id: `local-${Date.now()}`,
+        role: "assistant",
+        content: accumulated,
+        createdAt: new Date().toISOString(),
+      }
+      setBranches((prev) =>
+        prev.map((b) => {
+          if (b.id !== targetBranchId) return b
+          return {
+            ...b,
+            sessionId: finalSessionId ?? b.sessionId,
+            messages: [...b.messages, committed],
+          }
+        })
+      )
+    } catch (error) {
+      // Aborts are expected on unmount / re-send — don't surface those.
+      const isAbort =
+        error instanceof DOMException && error.name === "AbortError"
+      if (!isAbort) {
+        finalizeWithFallback(
+          "Failed to reach the continuation engine. Check that the local cluster is running."
+        )
+      }
     } finally {
+      window.clearTimeout(slowTimer)
       setSending(false)
+      setStreamingText("")
+      setStreamingBranchId(null)
+      setStreamSlow(false)
+      if (abortRef.current === controller) abortRef.current = null
       textareaRef.current?.focus()
     }
   }
@@ -524,10 +649,43 @@ export function GroundedChat({
           )
         })}
 
-        {sending && (
+        {sending && streamingBranchId && streamingText.length > 0 && (
+          <div className="flex justify-start">
+            <div className="flex flex-col gap-1 max-w-[85%]">
+              <div className="rounded-lg px-3 py-2 text-sm bg-muted">
+                <MarkdownProse
+                  content={streamingText}
+                  className="break-words"
+                />
+                <span className="inline-block w-1.5 h-3 ml-0.5 align-[-2px] bg-foreground/80 animate-pulse" />
+              </div>
+              <div className="text-[10px] text-muted-foreground">
+                Streaming…
+              </div>
+            </div>
+          </div>
+        )}
+
+        {sending && streamingText.length === 0 && (
           <div className="flex justify-start">
             <div className="bg-muted rounded-lg px-3 py-2">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            </div>
+          </div>
+        )}
+
+        {sending && streamSlow && (
+          <div className="flex justify-start">
+            <div className="text-[11px] text-muted-foreground px-1">
+              Taking longer than usual — the local model is still thinking.
+            </div>
+          </div>
+        )}
+
+        {streamError && !sending && (
+          <div className="flex justify-start">
+            <div className="text-[11px] text-muted-foreground px-1">
+              Stream warning: {streamError}
             </div>
           </div>
         )}

@@ -10,6 +10,7 @@ import {
   HelpCircle,
   LayoutDashboard,
   Search,
+  Settings,
   Sparkles,
   Star,
   Terminal,
@@ -41,6 +42,7 @@ import {
   SidebarTrigger,
 } from "@/registry/new-york-v4/ui/sidebar"
 import { Separator } from "@/registry/new-york-v4/ui/separator"
+import { Input } from "@/registry/new-york-v4/ui/input"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -181,6 +183,56 @@ export function OperatorStudioShell({
   )
 }
 
+// ─── Sidebar search ──────────────────────────────────────────────────────────
+
+function SidebarSearch() {
+  const router = useRouter()
+  const [value, setValue] = React.useState("")
+  const debouncedRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const navigate = React.useCallback(
+    (q: string) => {
+      const trimmed = q.trim()
+      if (trimmed.length < 2) return
+      router.push(`/operator-studio/search?q=${encodeURIComponent(trimmed)}`)
+    },
+    [router]
+  )
+
+  React.useEffect(() => {
+    if (debouncedRef.current) clearTimeout(debouncedRef.current)
+    const trimmed = value.trim()
+    if (trimmed.length < 2) return
+    debouncedRef.current = setTimeout(() => {
+      navigate(trimmed)
+    }, 400)
+    return () => {
+      if (debouncedRef.current) clearTimeout(debouncedRef.current)
+    }
+  }, [value, navigate])
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (debouncedRef.current) clearTimeout(debouncedRef.current)
+        navigate(value)
+      }}
+      className="relative"
+    >
+      <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        type="search"
+        placeholder="Search threads, messages…"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        className="h-8 pl-7 text-xs"
+        aria-label="Search Operator Studio"
+      />
+    </form>
+  )
+}
+
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 function OperatorStudioSidebar({
@@ -254,6 +306,9 @@ function OperatorStudioSidebar({
             active={activeWorkspace}
             workspaces={workspaces}
           />
+        </div>
+        <div className="px-1 pt-1">
+          <SidebarSearch />
         </div>
       </SidebarHeader>
 
@@ -378,6 +433,15 @@ function OperatorStudioSidebar({
 
       <SidebarFooter>
         <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname === "/operator-studio/admin"}
+              onClick={() => router.push("/operator-studio/admin")}
+            >
+              <Settings className="size-4" />
+              Admin
+            </SidebarMenuButton>
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
               isActive={pathname === "/operator-studio/docs"}

@@ -4,10 +4,13 @@ import * as React from "react"
 import { useRouter } from "next/navigation"
 import {
   ArrowLeft,
+  ArrowUpRight,
   ChevronDown,
   Clock,
+  Copy,
   Eye,
   Flame,
+  Globe,
   Info,
   MessageSquare,
   Send,
@@ -25,6 +28,7 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "lucide-react"
+import Link from "next/link"
 
 import { Badge } from "@/registry/new-york-v4/ui/badge"
 import { Button } from "@/registry/new-york-v4/ui/button"
@@ -48,6 +52,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/registry/new-york-v4/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/registry/new-york-v4/ui/dropdown-menu"
 import { Input } from "@/registry/new-york-v4/ui/input"
 import { Label } from "@/registry/new-york-v4/ui/label"
 import { Separator } from "@/registry/new-york-v4/ui/separator"
@@ -72,6 +84,11 @@ import type {
   PromotionKind,
   ContinuationPersona,
 } from "@/lib/operator-studio/types"
+import type { Workspace } from "@/lib/operator-studio/workspaces"
+
+// Mirrors `GLOBAL_WORKSPACE_ID` in `lib/operator-studio/workspaces.ts`. That
+// module is server-only, so we inline the constant here for client use.
+const GLOBAL_WORKSPACE_ID = "global"
 import {
   REVIEW_STATE_COLORS,
   REVIEW_STATE_LABELS,
@@ -118,6 +135,7 @@ interface ThreadDetailProps {
   reviewer: string | null
   forks: OperatorThread[]
   parentMessages: OperatorThreadMessage[]
+  activeWorkspace: Workspace
 }
 
 function buildPathMessagesForBranch(
@@ -179,6 +197,7 @@ export function ThreadDetail({
   reviewer,
   forks,
   parentMessages,
+  activeWorkspace,
 }: ThreadDetailProps) {
   const router = useRouter()
   const scrollRef = React.useRef<HTMLDivElement>(null)
@@ -721,6 +740,34 @@ export function ThreadDetail({
             <span className="text-[10px] text-muted-foreground hidden sm:inline">
               {messages.length} turns
             </span>
+            {thread.promotedFromId && (
+              <Link
+                href={`/operator-studio/threads/${thread.promotedFromId}`}
+                className="hidden sm:inline-flex"
+              >
+                <Badge
+                  variant="outline"
+                  className="text-[10px] px-1.5 py-0 h-5 font-normal hover:bg-muted"
+                >
+                  <ArrowUpRight className="h-2.5 w-2.5 mr-0.5" />
+                  Promoted from workspace
+                </Badge>
+              </Link>
+            )}
+            {thread.pulledFromId && (
+              <Link
+                href={`/operator-studio/threads/${thread.pulledFromId}`}
+                className="hidden sm:inline-flex"
+              >
+                <Badge
+                  variant="outline"
+                  className="text-[10px] px-1.5 py-0 h-5 font-normal hover:bg-muted"
+                >
+                  <Globe className="h-2.5 w-2.5 mr-0.5" />
+                  Pulled from global
+                </Badge>
+              </Link>
+            )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             <Button
@@ -738,6 +785,10 @@ export function ThreadDetail({
             {thread.reviewState === "imported" && (
               <ReviewButton threadId={thread.id} />
             )}
+            <CopyThreadMenu
+              thread={thread}
+              activeWorkspace={activeWorkspace}
+            />
             {confirmDeleteThread ? (
               <div className="flex items-center gap-1">
                 <Button
@@ -1632,5 +1683,212 @@ function ReviewButton({ threadId }: { threadId: string }) {
       <Eye className="mr-1 h-3 w-3" />
       {loading ? "…" : "Review"}
     </Button>
+  )
+}
+
+// ─── Copy Thread Menu (cross-workspace Promote / Pull) ──────────────────────
+
+type CopyAction = "promote" | "pull"
+
+interface CopyResult {
+  action: CopyAction
+  newThreadId: string
+  viewUrl: string
+}
+
+function CopyThreadMenu({
+  thread,
+  activeWorkspace,
+}: {
+  thread: OperatorThread
+  activeWorkspace: Workspace
+}) {
+  const router = useRouter()
+  const [open, setOpen] = React.useState(false)
+  const [pendingAction, setPendingAction] = React.useState<CopyAction | null>(
+    null
+  )
+  const [submitting, setSubmitting] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+  const [result, setResult] = React.useState<CopyResult | null>(null)
+
+  const threadInGlobal = thread.workspaceId === GLOBAL_WORKSPACE_ID
+  const activeIsGlobal = activeWorkspace.id === GLOBAL_WORKSPACE_ID
+
+  // Promote is only valid when the thread lives in a sub-workspace AND we're
+  // viewing that sub-workspace. (The copy route resolves the source from the
+  // active workspace cookie.)
+  const canPromote = !threadInGlobal && thread.workspaceId === activeWorkspace.id
+  // Pull is only valid when the thread is in global AND the active workspace
+  // is a sub-workspace (the target).
+  const canPull = threadInGlobal && !activeIsGlobal
+
+  if (!canPromote && !canPull) return null
+
+  const reset = () => {
+    setPendingAction(null)
+    setError(null)
+    setResult(null)
+  }
+
+  const submit = async () => {
+    if (!pendingAction) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const body =
+        pendingAction === "promote"
+          ? { action: "promote" }
+          : { action: "pull", targetWorkspaceId: activeWorkspace.id }
+      const res = await fetch(
+        `/api/operator-studio/threads/${thread.id}/copy`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      )
+      const data = await res.json()
+      if (!res.ok || !data.ok) {
+        setError(
+          typeof data?.error === "string"
+            ? data.error
+            : "Copy failed. Try again."
+        )
+        return
+      }
+      setResult({
+        action: pendingAction,
+        newThreadId: data.newThreadId,
+        viewUrl: data.viewUrl,
+      })
+      router.refresh()
+    } catch {
+      setError("Network error. Check your connection and try again.")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const closeDialog = (nextOpen: boolean) => {
+    if (submitting) return
+    if (!nextOpen) reset()
+    setOpen(nextOpen)
+  }
+
+  const activeLabel = activeWorkspace.label
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="sm" className="h-7 px-2 text-xs">
+            <Copy className="mr-1 h-3 w-3" />
+            Copy…
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuLabel className="text-xs">
+            Cross-workspace copy
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {canPromote && (
+            <DropdownMenuItem
+              onSelect={(e) => {
+                e.preventDefault()
+                setPendingAction("promote")
+                setOpen(true)
+              }}
+              className="text-xs"
+            >
+              <ArrowUpRight className="mr-2 h-3.5 w-3.5" />
+              Promote to Global
+            </DropdownMenuItem>
+          )}
+          {canPull && (
+            <DropdownMenuItem
+              onSelect={(e) => {
+                e.preventDefault()
+                setPendingAction("pull")
+                setOpen(true)
+              }}
+              className="text-xs"
+            >
+              <Globe className="mr-2 h-3.5 w-3.5" />
+              Pull into {activeLabel}
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Dialog open={open} onOpenChange={closeDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {pendingAction === "promote"
+                ? "Copy this thread to the global library?"
+                : `Copy this thread into ${activeLabel}?`}
+            </DialogTitle>
+            <DialogDescription>
+              {pendingAction === "promote"
+                ? "This creates an independent copy of the thread (and its messages and summaries) in the global library. The original stays in your workspace, untouched."
+                : "This creates an independent copy of the thread (and its messages and summaries) in your active workspace. The original stays in global, untouched."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {error && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error}
+            </div>
+          )}
+
+          {result && (
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs">
+              {result.action === "promote" ? "Promoted." : "Pulled."}{" "}
+              <Link
+                href={result.viewUrl}
+                className="font-medium underline underline-offset-2"
+              >
+                {result.action === "promote"
+                  ? "View in global"
+                  : `View in ${activeLabel}`}
+              </Link>
+            </div>
+          )}
+
+          <DialogFooter>
+            {result ? (
+              <Button variant="outline" onClick={() => closeDialog(false)}>
+                Close
+              </Button>
+            ) : (
+              <>
+                <Button
+                  variant="ghost"
+                  onClick={() => closeDialog(false)}
+                  disabled={submitting}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={submit} disabled={submitting}>
+                  {submitting ? (
+                    <>
+                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                      {pendingAction === "promote"
+                        ? "Promoting…"
+                        : "Pulling…"}
+                    </>
+                  ) : pendingAction === "promote" ? (
+                    "Promote to Global"
+                  ) : (
+                    `Pull into ${activeLabel}`
+                  )}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }

@@ -7,6 +7,7 @@ import type {
   OperatorThreadSummary,
   OperatorChatSession,
 } from "@/lib/operator-studio/types"
+import type { Workspace } from "@/lib/operator-studio/workspaces"
 import { ThreadDetail } from "../../components/thread-detail"
 
 interface ThreadDetailClientProps {
@@ -16,6 +17,7 @@ interface ThreadDetailClientProps {
   sessions: OperatorChatSession[]
   forks: OperatorThread[]
   parentMessages: OperatorThreadMessage[]
+  activeWorkspace: Workspace
 }
 
 export function ThreadDetailClient({
@@ -25,6 +27,7 @@ export function ThreadDetailClient({
   sessions,
   forks,
   parentMessages,
+  activeWorkspace,
 }: ThreadDetailClientProps) {
   const [reviewer, setReviewer] = React.useState<string | null>(null)
 
@@ -42,6 +45,7 @@ export function ThreadDetailClient({
       reviewer={reviewer}
       forks={forks}
       parentMessages={parentMessages}
+      activeWorkspace={activeWorkspace}
     />
   )
 }

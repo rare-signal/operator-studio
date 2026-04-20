@@ -24,12 +24,25 @@ import {
 } from "@/lib/operator-studio/continuation-context"
 
 /**
- * Grounded continuation chat endpoint.
+ * Grounded continuation chat endpoint — two request modes.
  *
- * Routes a grounded prompt (active thread context + optional source thread
- * context + recent history) through an OpenAI-compatible chat/completions
- * endpoint. If no endpoint is configured the endpoint echoes the user message
- * so the UI still functions during local dev.
+ * 1. Non-streaming (default): POST /api/operator-studio/chat
+ *    Buffers the full LLM completion and returns a single JSON body
+ *    shaped { sessionId, message }. Preserved for back-compat.
+ *
+ * 2. Streaming: POST /api/operator-studio/chat?stream=1 (or
+ *    `Accept: text/event-stream` header)
+ *    Returns a text/event-stream response. Frames emitted:
+ *      - event: start  data: { sessionId, contextSnapshot }
+ *      - event: delta  data: { content }   (zero or more)
+ *      - event: done   data: { message }   (final — DB-saved assistant row)
+ *      - event: error  data: { error }     (on failure; still followed by done)
+ *
+ * Both paths run the same grounding logic: workspace resolution, history
+ * selection, context snapshot, persona selection, user-message append, and
+ * context snapshot update. If WORKBOOK_CLUSTER_ENDPOINTS is unset the
+ * endpoint emits the echo-mode fallback response — in streaming mode that
+ * comes through as a single start → done pair without delta frames.
  */
 
 export const dynamic = "force-dynamic"
@@ -91,19 +104,34 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ session, messages })
 }
 
-export async function POST(req: NextRequest) {
+interface PreparedContext {
+  activeSessionId: string
+  systemPrompt: string
+  chatHistory: Array<{ role: string; content: string }>
+  contextSnapshot: Record<string, unknown>
+  echoFallback: string
+}
+
+async function prepareGroundedContext(
+  req: NextRequest
+): Promise<
+  | { ok: true; prepared: PreparedContext }
+  | { ok: false; status: number; error: string; issues?: unknown }
+> {
   const auth = await authorizeRequest(req)
   if (!auth.ok) {
-    return NextResponse.json({ error: auth.reason }, { status: 401 })
+    return { ok: false, status: 401, error: auth.reason }
   }
   const workspaceId = await getActiveWorkspaceId()
   const raw = await req.json().catch(() => null)
   const parsed = postSchema.safeParse(raw)
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Invalid body", issues: parsed.error.issues },
-      { status: 400 }
-    )
+    return {
+      ok: false,
+      status: 400,
+      error: "Invalid body",
+      issues: parsed.error.issues,
+    }
   }
   const body = parsed.data
   const operatorName =
@@ -238,12 +266,54 @@ export async function POST(req: NextRequest) {
     : CONTINUATION_PERSONAS[0]
 
   const systemPrompt = buildSystemPrompt(contextParts, persona?.systemPromptSuffix)
-  let assistantContent: string
 
+  const echoFallback = `[Engine unavailable — echo mode]\n\nI received your message: "${body.message}"\n\nThe continuation engine is not currently reachable. Set WORKBOOK_CLUSTER_ENDPOINTS to one or more OpenAI-compatible chat endpoints (llama.cpp, vLLM, Ollama, LM Studio, or a cloud provider) to enable real responses.`
+
+  return {
+    ok: true,
+    prepared: {
+      activeSessionId,
+      systemPrompt,
+      chatHistory,
+      contextSnapshot,
+      echoFallback,
+    },
+  }
+}
+
+function isStreamingRequested(req: NextRequest): boolean {
+  const url = new URL(req.url)
+  if (url.searchParams.get("stream") === "1") return true
+  const accept = req.headers.get("accept") || ""
+  return accept.includes("text/event-stream")
+}
+
+export async function POST(req: NextRequest) {
+  if (isStreamingRequested(req)) {
+    return handleStreamingPOST(req)
+  }
+  return handleJsonPOST(req)
+}
+
+async function handleJsonPOST(req: NextRequest) {
+  const prep = await prepareGroundedContext(req)
+  if (!prep.ok) {
+    return NextResponse.json(
+      prep.issues !== undefined
+        ? { error: prep.error, issues: prep.issues }
+        : { error: prep.error },
+      { status: prep.status }
+    )
+  }
+  const { activeSessionId, systemPrompt, chatHistory, contextSnapshot, echoFallback } =
+    prep.prepared
+  const workspaceId = await getActiveWorkspaceId()
+
+  let assistantContent: string
   try {
     assistantContent = await callEngine(systemPrompt, chatHistory)
   } catch {
-    assistantContent = `[Engine unavailable — echo mode]\n\nI received your message: "${body.message}"\n\nThe continuation engine is not currently reachable. Set WORKBOOK_CLUSTER_ENDPOINTS to one or more OpenAI-compatible chat endpoints (llama.cpp, vLLM, Ollama, LM Studio, or a cloud provider) to enable real responses.`
+    assistantContent = echoFallback
   }
 
   const assistantMsg = await appendChatMessage({
@@ -259,6 +329,115 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     sessionId: activeSessionId,
     message: assistantMsg,
+  })
+}
+
+async function handleStreamingPOST(req: NextRequest) {
+  const prep = await prepareGroundedContext(req)
+  if (!prep.ok) {
+    return NextResponse.json(
+      prep.issues !== undefined
+        ? { error: prep.error, issues: prep.issues }
+        : { error: prep.error },
+      { status: prep.status }
+    )
+  }
+  const { activeSessionId, systemPrompt, chatHistory, contextSnapshot, echoFallback } =
+    prep.prepared
+  const workspaceId = await getActiveWorkspaceId()
+
+  const encoder = new TextEncoder()
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        try {
+          controller.enqueue(
+            encoder.encode(
+              `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+            )
+          )
+        } catch {
+          // controller may be closed if the client aborted
+        }
+      }
+
+      // Frame 1: start
+      send("start", {
+        sessionId: activeSessionId,
+        contextSnapshot,
+      })
+
+      let assistantContent = ""
+      let errored = false
+
+      const endpoints = getEndpoints()
+      if (endpoints.length === 0) {
+        // Echo-mode fallback: single start → done pair, no deltas.
+        assistantContent = echoFallback
+      } else {
+        try {
+          for await (const delta of callEngineStreaming(systemPrompt, chatHistory)) {
+            if (!delta) continue
+            assistantContent += delta
+            send("delta", { content: delta })
+          }
+          if (!assistantContent.trim()) {
+            throw new Error("Response was empty.")
+          }
+        } catch (error) {
+          errored = true
+          const message =
+            error instanceof Error ? error.message : String(error)
+          send("error", { error: message })
+          // Fall back to echo-mode body so the thread still moves forward.
+          assistantContent = echoFallback
+        }
+      }
+
+      // Persist final assistant message BEFORE emitting done so id is real.
+      let assistantMsg
+      try {
+        assistantMsg = await appendChatMessage({
+          id: `cmsg-${randomUUID()}`,
+          workspaceId,
+          sessionId: activeSessionId,
+          role: "assistant",
+          content: assistantContent,
+          modelLabel: ENGINE_MODEL,
+          contextSnapshotJson: contextSnapshot,
+        })
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error)
+        send("error", { error: `Failed to persist assistant message: ${message}` })
+        errored = true
+      }
+
+      send("done", {
+        message: assistantMsg,
+        errored,
+      })
+
+      try {
+        controller.close()
+      } catch {
+        // already closed
+      }
+    },
+    cancel() {
+      // Client aborted — nothing else to clean up for now (the upstream
+      // fetch is bounded by AbortSignal.timeout inside callEngineStreaming).
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
   })
 }
 
@@ -329,6 +508,113 @@ async function callEngine(
       return content
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
+    }
+  }
+
+  throw lastError ?? new Error("All engine endpoints failed")
+}
+
+/**
+ * Streaming variant of callEngine. POSTs to the same OpenAI-compatible
+ * /v1/chat/completions endpoint with `stream: true` and yields text deltas
+ * from `choices[0].delta.content` as they arrive. Tries endpoints in order
+ * and falls back to the next one on connection errors *before* the first
+ * delta is received. If no endpoints are configured this throws — callers
+ * should check for empty endpoint lists themselves and take the echo path.
+ */
+async function* callEngineStreaming(
+  systemPrompt: string,
+  history: Array<{ role: string; content: string }>
+): AsyncGenerator<string, void, void> {
+  const endpoints = getEndpoints()
+  if (endpoints.length === 0) throw new Error("No engine endpoints configured")
+
+  const messages = [{ role: "system", content: systemPrompt }, ...history]
+
+  let lastError: Error | null = null
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(
+        `${endpoint.replace(/\/$/, "")}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify({
+            model: ENGINE_MODEL,
+            messages,
+            max_tokens: 2048,
+            temperature: 0.7,
+            stream: true,
+          }),
+          signal: AbortSignal.timeout(getTimeoutMs()),
+        }
+      )
+
+      if (!res.ok || !res.body) {
+        const errBody = res.body ? await res.text() : ""
+        throw new Error(`${res.status}: ${errBody.slice(0, 320)}`)
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+
+          // SSE frames are separated by blank lines. Split by \n\n.
+          let idx: number
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const rawFrame = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+
+            // A frame may have multiple `data:` lines; concat them.
+            const dataLines = rawFrame
+              .split("\n")
+              .map((line) => line.trim())
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trimStart())
+
+            if (dataLines.length === 0) continue
+            const payload = dataLines.join("\n")
+            if (payload === "[DONE]") {
+              return
+            }
+            try {
+              const parsed = JSON.parse(payload) as {
+                choices?: Array<{ delta?: { content?: unknown } }>
+              }
+              const delta = parsed.choices?.[0]?.delta?.content
+              const text = extractTextContent(delta)
+              if (text) {
+                yield text
+              }
+            } catch {
+              // Ignore malformed frames; some servers emit keep-alives.
+            }
+          }
+        }
+      } finally {
+        try {
+          reader.releaseLock()
+        } catch {
+          // already released
+        }
+      }
+
+      // If we got here without a [DONE] marker, assume the stream ended
+      // cleanly — nothing else to yield.
+      return
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      // Try the next endpoint.
     }
   }
 
