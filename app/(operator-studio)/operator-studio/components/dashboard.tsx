@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import {
   ArrowRight,
@@ -278,13 +279,18 @@ function ThreadCard({ thread }: { thread: OperatorThread }) {
         {thread.tags.length > 0 && (
           <div className="flex flex-wrap gap-1 mt-2">
             {thread.tags.slice(0, 4).map((tag) => (
-              <Badge
+              <Link
                 key={tag}
-                variant="outline"
-                className="text-[9px] px-1 py-0 h-4"
+                href={`/operator-studio/search?tag=${encodeURIComponent(tag)}`}
+                onClick={(e) => e.stopPropagation()}
               >
-                {tag}
-              </Badge>
+                <Badge
+                  variant="outline"
+                  className="text-[9px] px-1 py-0 h-4 hover:border-foreground/40 hover:text-foreground cursor-pointer"
+                >
+                  #{tag}
+                </Badge>
+              </Link>
             ))}
           </div>
         )}

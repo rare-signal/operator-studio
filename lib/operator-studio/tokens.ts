@@ -29,6 +29,7 @@ export interface ApiTokenRow {
   createdBy: string
   createdAt: string
   lastUsedAt: string | null
+  useCount: number
   revokedAt: string | null
 }
 
@@ -44,6 +45,7 @@ function toApiTokenRow(row: Row): ApiTokenRow {
     createdBy: row.createdBy,
     createdAt: row.createdAt.toISOString(),
     lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+    useCount: row.useCount,
     revokedAt: row.revokedAt?.toISOString() ?? null,
   }
 }
@@ -82,6 +84,7 @@ export async function createApiToken(input: {
     createdBy: input.createdBy.trim(),
     createdAt: now,
     lastUsedAt: null,
+    useCount: 0,
     revokedAt: null,
   }
   await db.insert(apiTokens).values(row)

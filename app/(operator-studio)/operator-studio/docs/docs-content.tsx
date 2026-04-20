@@ -440,6 +440,13 @@ const SECTIONS: Section[] = [
             <code>workspaceId</code> — target workspace (defaults to the
             active cookie, falling back to <code>global</code>)
           </li>
+          <li>
+            <code>autoTag</code> — set to <code>1</code> to run the ingest
+            through the LLM cluster for 2–5 derived tags when the caller
+            doesn't supply explicit <code>tags</code>. Requires{" "}
+            <code>WORKBOOK_CLUSTER_ENDPOINTS</code> to be configured;
+            silently falls back to no tags when not reachable.
+          </li>
         </ul>
 
         <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">

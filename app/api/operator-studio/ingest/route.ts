@@ -45,7 +45,12 @@ import {
   type DetectedFormat,
 } from "@/lib/operator-studio/importers/universal-parser"
 import { deriveTitle } from "@/lib/operator-studio/importers/generate-title"
+import { deriveTags } from "@/lib/operator-studio/importers/generate-tags"
 import { emitWebhookEvent } from "@/lib/operator-studio/webhooks"
+import {
+  checkRateLimit,
+  resolveRateLimitKey,
+} from "@/lib/operator-studio/rate-limit"
 import {
   OPERATOR_SOURCE_APPS,
   type OperatorSourceApp,
@@ -69,6 +74,9 @@ const querySchema = z.object({
   dedupeKey: z.string().trim().max(256).optional(),
   // Explicitly disable dedupe (rarely wanted, but useful for one-off tests).
   allowDuplicates: z.string().optional(),
+  // Opt-in: when truthy AND `tags` is not provided, run the ingest through
+  // the LLM cluster to derive 2–5 short topic tags.
+  autoTag: z.string().optional(),
 })
 
 export async function POST(req: NextRequest) {
@@ -79,6 +87,22 @@ export async function POST(req: NextRequest) {
       auth.reason,
       "Provide Authorization: Bearer <token> or sign in with the session cookie. Mint per-user tokens in the Admin page, or set OPERATOR_STUDIO_INGEST_TOKEN for a shared legacy token."
     )
+  }
+
+  // Rate limit by token-id (strongest identity) or client IP. A misconfigured
+  // IDE hook firing on every keystroke shouldn't be able to tank the DB.
+  const rateKey = resolveRateLimitKey(req, auth.tokenId)
+  const rl = checkRateLimit(rateKey)
+  if (!rl.ok) {
+    const res = jsonError(
+      429,
+      "Rate limit exceeded",
+      `Try again in ${Math.ceil(rl.resetInMs / 1000)}s. Default is 60 req/min; override via OPERATOR_STUDIO_INGEST_RATE_LIMIT.`
+    )
+    res.headers.set("Retry-After", String(Math.ceil(rl.resetInMs / 1000)))
+    res.headers.set("X-RateLimit-Limit", String(rl.limit))
+    res.headers.set("X-RateLimit-Remaining", "0")
+    return res
   }
 
   // Parse query params.
@@ -146,7 +170,19 @@ export async function POST(req: NextRequest) {
     parsed.title?.trim() ||
     (await deriveTitle(parsed.messages.map((m) => ({ role: m.role, content: m.content }))))
 
-  const tags = parseTags(query.tags)
+  let tags = parseTags(query.tags)
+  const autoTagRequested =
+    query.autoTag === "1" || query.autoTag === "true"
+  let autoTagged = false
+  if (tags.length === 0 && autoTagRequested) {
+    const derived = await deriveTags(
+      parsed.messages.map((m) => ({ role: m.role, content: m.content }))
+    )
+    if (derived.length > 0) {
+      tags = derived
+      autoTagged = true
+    }
+  }
 
   // Dedupe. The derived key is a content hash of the messages so two identical
   // pastes collide even without an explicit upstream thread id. Callers with
@@ -251,6 +287,8 @@ export async function POST(req: NextRequest) {
       detectedFormat: parsed.detectedFormat,
       messageCount: parsed.messages.length,
       title,
+      tags,
+      autoTagged,
       notes: parsed.notes,
       viewUrl: `/operator-studio/threads/${threadId}`,
     })

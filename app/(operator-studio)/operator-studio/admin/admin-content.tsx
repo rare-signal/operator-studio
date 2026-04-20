@@ -1,8 +1,9 @@
 "use client"
 
 import * as React from "react"
-import { KeyRound, Webhook } from "lucide-react"
+import { Download, KeyRound, Webhook } from "lucide-react"
 
+import { Button } from "@/registry/new-york-v4/ui/button"
 import { Separator } from "@/registry/new-york-v4/ui/separator"
 import type { WorkspaceSummary } from "@/app/components/workspace-switcher"
 import { TokensPanel } from "./tokens-panel"
@@ -21,17 +22,32 @@ export function AdminContent({
 }: AdminContentProps) {
   const [section, setSection] = React.useState<AdminSection>("tokens")
 
+  const exportHref = `/api/operator-studio/export?workspaceId=${encodeURIComponent(activeWorkspace.id)}`
+
   return (
     <div className="mx-auto w-full max-w-4xl px-6 py-10">
-      <header className="mb-8 space-y-2">
-        <p className="text-xs uppercase tracking-wider text-muted-foreground">
-          Administration
-        </p>
-        <h1 className="text-3xl font-semibold tracking-tight">Admin</h1>
-        <p className="text-sm text-muted-foreground">
-          Mint API tokens for ingest scripts and manage outbound webhook
-          subscriptions for this workspace.
-        </p>
+      <header className="mb-8 flex items-start justify-between gap-4">
+        <div className="space-y-2">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">
+            Administration
+          </p>
+          <h1 className="text-3xl font-semibold tracking-tight">Admin</h1>
+          <p className="text-sm text-muted-foreground">
+            Mint API tokens for ingest scripts and manage outbound webhook
+            subscriptions for this workspace.
+          </p>
+        </div>
+        <a
+          href={exportHref}
+          download
+          className="shrink-0"
+          title={`Download a JSON export of the "${activeWorkspace.label}" workspace`}
+        >
+          <Button variant="outline" size="sm" className="gap-2">
+            <Download className="h-4 w-4" />
+            Export workspace
+          </Button>
+        </a>
       </header>
 
       <nav className="mb-8 flex items-center gap-1 rounded-lg border p-1">

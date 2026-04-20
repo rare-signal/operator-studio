@@ -388,6 +388,9 @@ export function TokensPanel({ workspaces }: TokensPanelProps) {
                   <th className="px-3 py-2 text-left font-medium">
                     Last used
                   </th>
+                  <th className="px-3 py-2 text-right font-medium tabular-nums">
+                    Uses
+                  </th>
                   <th className="px-3 py-2 text-left font-medium">Status</th>
                   <th className="px-3 py-2 text-right font-medium">Actions</th>
                 </tr>
@@ -417,6 +420,9 @@ export function TokensPanel({ workspaces }: TokensPanelProps) {
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
                         {t.lastUsedAt ? formatDate(t.lastUsedAt) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-xs text-muted-foreground">
+                        {t.useCount.toLocaleString()}
                       </td>
                       <td className="px-3 py-2">
                         {isRevoked ? (

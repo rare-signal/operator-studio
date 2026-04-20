@@ -207,6 +207,7 @@ export const apiTokens = pgTable(
     createdBy: text("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    useCount: integer("use_count").notNull().default(0),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
   (t) => [

@@ -27,6 +27,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Link2,
 } from "lucide-react"
 import Link from "next/link"
 
@@ -237,6 +238,41 @@ export function ThreadDetail({
 
   const [confirmDeleteThread, setConfirmDeleteThread] = React.useState(false)
   const [deletingThread, setDeletingThread] = React.useState(false)
+
+  // ── Related threads (full-text similarity on search_tsv) ──
+  const [relatedThreads, setRelatedThreads] = React.useState<
+    Array<{
+      id: string
+      rawTitle: string | null
+      promotedTitle: string | null
+      reviewState: string
+      sourceApp: string
+      tags: string[]
+      similarity: number
+    }>
+  >([])
+
+  React.useEffect(() => {
+    let cancelled = false
+    async function loadRelated() {
+      try {
+        const res = await fetch(
+          `/api/operator-studio/threads/${thread.id}/related?limit=5`
+        )
+        if (!res.ok) return
+        const data = await res.json()
+        if (!cancelled && Array.isArray(data.related)) {
+          setRelatedThreads(data.related)
+        }
+      } catch {
+        // Silent: related threads are a nice-to-have.
+      }
+    }
+    loadRelated()
+    return () => {
+      cancelled = true
+    }
+  }, [thread.id])
 
   const handleDeleteThread = async () => {
     setDeletingThread(true)
@@ -934,6 +970,8 @@ export function ThreadDetail({
                     reviewer={reviewer}
                     onPromote={handlePromoteMessage}
                     onUnpromote={handleUnpromoteMessage}
+                    threadId={thread.parentThreadId ?? thread.id}
+                    threadTitle={title}
                   />
                 ))}
               <div className="relative py-6">
@@ -959,6 +997,8 @@ export function ThreadDetail({
               onUnpromote={handleUnpromoteMessage}
               onEditContent={handleEditMessageContent}
               onDeleteMessage={handleDeleteMessage}
+              threadId={thread.id}
+              threadTitle={title}
             />
           ))}
 
@@ -1113,6 +1153,8 @@ export function ThreadDetail({
                       showBranchActions={!sending && continuationMessages.length > 1}
                       siblingInfo={msg.siblingInfo}
                       onSwitchSibling={switchForkByKey}
+                      threadId={thread.id}
+                      threadTitle={title}
                     />
                   )}
                 </React.Fragment>
@@ -1136,6 +1178,61 @@ export function ThreadDetail({
                 </div>
               )}
             </>
+          )}
+
+          {/* ── Related threads (tsvector similarity) ── */}
+          {relatedThreads.length > 0 && (
+            <div className="mt-8 pt-6 border-t">
+              <div className="flex items-center gap-1.5 mb-3">
+                <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
+                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  Related threads
+                </p>
+              </div>
+              <div className="space-y-2">
+                {relatedThreads.map((rel) => (
+                  <button
+                    key={rel.id}
+                    onClick={() =>
+                      router.push(`/operator-studio/threads/${rel.id}`)
+                    }
+                    className="w-full flex flex-col gap-1.5 px-3 py-2 rounded-lg border hover:bg-accent/50 transition-colors text-left"
+                  >
+                    <p className="text-sm font-medium truncate">
+                      {rel.promotedTitle ?? rel.rawTitle ?? "Untitled thread"}
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <SourceAppToken
+                        source={rel.sourceApp}
+                        size="sm"
+                        shortLabel
+                      />
+                      <Badge
+                        variant="secondary"
+                        className={`text-[10px] px-1.5 py-0 h-5 font-normal ${
+                          REVIEW_STATE_COLORS[
+                            rel.reviewState as keyof typeof REVIEW_STATE_COLORS
+                          ] ?? ""
+                        }`}
+                      >
+                        {REVIEW_STATE_LABELS[
+                          rel.reviewState as keyof typeof REVIEW_STATE_LABELS
+                        ] ?? rel.reviewState}
+                      </Badge>
+                      {rel.tags.slice(0, 2).map((tag) => (
+                        <Badge
+                          key={tag}
+                          variant="outline"
+                          className="text-[9px] px-1 py-0 h-4"
+                        >
+                          {tag}
+                        </Badge>
+                      ))}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       </div>
@@ -1195,6 +1292,8 @@ function TimelineMessage({
   showBranchActions,
   siblingInfo,
   onSwitchSibling,
+  threadId,
+  threadTitle,
 }: {
   msg: ChatMessage
   reviewer: string | null
@@ -1207,6 +1306,8 @@ function TimelineMessage({
   showBranchActions?: boolean
   siblingInfo?: { total: number; current: number; forkKey: string } | null
   onSwitchSibling?: (forkKey: string, direction: "prev" | "next") => void
+  threadId?: string
+  threadTitle?: string
 }) {
   const isUser = msg.role === "user"
   const isPromoted = !!msg.promotedAt
@@ -1220,6 +1321,41 @@ function TimelineMessage({
   // Delete confirmation state
   const [confirmDelete, setConfirmDelete] = React.useState(false)
   const [deleting, setDeleting] = React.useState(false)
+
+  // Copy-reference state (promoted-message affordance)
+  const [refCopied, setRefCopied] = React.useState(false)
+
+  const handleCopyReference = async () => {
+    if (!threadId) return
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : ""
+    const url = `${origin}/operator-studio/threads/${threadId}#msg-${msg.id}`
+    const kindLabel = msg.promotionKind
+      ? PROMOTION_KIND_LABELS[msg.promotionKind]
+      : "Promoted"
+    const actor = msg.promotedBy ?? "operator"
+    const title = threadTitle ?? "thread"
+    const snippet =
+      msg.content.length > 200
+        ? `${msg.content.slice(0, 200).trim()}…`
+        : msg.content.trim()
+    // Each line must start with "> " to stay inside the blockquote.
+    const snippetBlock = snippet
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n")
+    const reference =
+      `> **[Promoted insight]** ${kindLabel} from **${actor}** in [${title}](${url}):\n` +
+      `>\n` +
+      `${snippetBlock}`
+    try {
+      await navigator.clipboard.writeText(reference)
+      setRefCopied(true)
+      setTimeout(() => setRefCopied(false), 1500)
+    } catch {
+      // Clipboard unavailable; silently ignore.
+    }
+  }
 
   const handleSaveEdit = async () => {
     if (!onEditContent || editContent.trim() === msg.content) {
@@ -1241,7 +1377,10 @@ function TimelineMessage({
   }
 
   return (
-    <div className={`group flex ${isUser ? "justify-end" : "justify-start"} py-1`}>
+    <div
+      id={`msg-${msg.id}`}
+      className={`group flex ${isUser ? "justify-end" : "justify-start"} py-1`}
+    >
       <div className="flex flex-col gap-0.5 max-w-[85%]">
         {/* Role label for transcript messages */}
         {isTranscript && (
@@ -1397,6 +1536,28 @@ function TimelineMessage({
               source={msg.source}
               onPromote={onPromote}
             />
+          )}
+
+          {/* Copy reference — only for promoted messages */}
+          {isPromoted && threadId && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleCopyReference}
+              className="h-auto gap-1 px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground hover:text-foreground"
+            >
+              {refCopied ? (
+                <>
+                  <Check className="h-3 w-3" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3 w-3" />
+                  Copy reference
+                </>
+              )}
+            </Button>
           )}
 
           {/* Inline edit / delete for transcript messages */}

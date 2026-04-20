@@ -7,6 +7,8 @@ import {
   ChevronRight,
   Download,
   Eye,
+  Activity,
+  BarChart3,
   HelpCircle,
   LayoutDashboard,
   Search,
@@ -328,6 +330,24 @@ function OperatorStudioSidebar({
                 >
                   <LayoutDashboard className="size-4" />
                   Dashboard
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={pathname === "/operator-studio/activity"}
+                  onClick={() => router.push("/operator-studio/activity")}
+                >
+                  <Activity className="size-4" />
+                  Activity
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={pathname === "/operator-studio/metrics"}
+                  onClick={() => router.push("/operator-studio/metrics")}
+                >
+                  <BarChart3 className="size-4" />
+                  Metrics
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>

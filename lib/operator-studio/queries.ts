@@ -299,6 +299,24 @@ export async function softDeleteThread(workspaceId: string, threadId: string) {
     )
 }
 
+export async function unarchiveThread(workspaceId: string, threadId: string) {
+  const db = getDb()
+  await db
+    .update(operatorThreads)
+    .set({
+      visibleInStudio: 1,
+      archivedAt: null,
+      reviewState: "in-review",
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(operatorThreads.id, threadId),
+        eq(operatorThreads.workspaceId, workspaceId)
+      )
+    )
+}
+
 export async function promoteThreadMetadata(
   workspaceId: string,
   threadId: string,
@@ -779,6 +797,36 @@ export type SearchMessageHit = OperatorThreadMessage & {
   snippet: string
   threadTitle: string | null
   threadId: string
+}
+
+/**
+ * Exact-tag filter. Returns visible threads in the workspace whose tags
+ * jsonb array contains the given tag. Used by the sidebar "click a tag
+ * chip" flow via /api/operator-studio/search?tag=...
+ */
+export async function findThreadsByTag(
+  workspaceId: string,
+  tag: string,
+  limit = 30
+): Promise<OperatorThread[]> {
+  const t = tag.trim()
+  if (t.length === 0) return []
+  const capped = Math.max(1, Math.min(limit, 100))
+
+  const db = getDb()
+  const rows = await db
+    .select()
+    .from(operatorThreads)
+    .where(
+      and(
+        eq(operatorThreads.workspaceId, workspaceId),
+        eq(operatorThreads.visibleInStudio, 1),
+        sql`${operatorThreads.tags} @> ${JSON.stringify([t])}::jsonb`
+      )
+    )
+    .orderBy(desc(operatorThreads.importedAt))
+    .limit(capped)
+  return rows.map(toThread)
 }
 
 /**

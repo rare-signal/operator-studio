@@ -13,6 +13,7 @@ import {
   getThreadSummaries,
   promoteThreadMetadata,
   softDeleteThread,
+  unarchiveThread,
   updateThreadReviewState,
 } from "@/lib/operator-studio/queries"
 import type { OperatorReviewState } from "@/lib/operator-studio/types"
@@ -31,6 +32,9 @@ const patchSchema = z.union([
     whyItMatters: z.string().trim().max(8192).optional(),
     tags: z.array(z.string().trim().min(1).max(64)).max(64).optional(),
     projectSlug: z.string().trim().max(128).optional(),
+  }),
+  z.object({
+    action: z.literal("unarchive"),
   }),
   z.object({
     reviewState: z.enum(["imported", "in-review", "promoted", "archived"]),
@@ -126,6 +130,11 @@ export async function PATCH(
       projectSlug: body.projectSlug ?? null,
       promotedBy,
     })
+    return NextResponse.json({ ok: true })
+  }
+
+  if ("action" in body && body.action === "unarchive") {
+    await unarchiveThread(workspaceId, threadId)
     return NextResponse.json({ ok: true })
   }
 

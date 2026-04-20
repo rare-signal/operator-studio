@@ -15,6 +15,13 @@
       "when": 1776717100000,
       "tag": "0001_search_tsv",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776720000000,
+      "tag": "0002_api_token_use_count",
+      "breakpoints": true
     }
   ]
 }

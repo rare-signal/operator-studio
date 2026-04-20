@@ -27,10 +27,14 @@ opsctl() {
 
 opsctl_help() {
   cat <<'EOF'
-opsctl ingest [--title T] [--tags a,b,c] [--project P] [--source S] [--workspace W] [--content-type CT]
+opsctl ingest [--title T] [--tags a,b,c] [--project P] [--source S] [--workspace W] [--content-type CT] [--auto-tag]
   Reads stdin and POSTs to /api/operator-studio/ingest.
   Auto-detects JSON vs text by sniffing the first non-whitespace character
   (you can override with --content-type application/json or text/plain).
+  Pass --auto-tag to append &autoTag=1 so the server runs the ingest
+  through the LLM cluster and derives 2–5 topic tags when --tags is
+  not provided. Silently falls back to no tags when the cluster is
+  unreachable.
 
 opsctl open <threadId>
   Open the thread in your browser.
@@ -39,6 +43,7 @@ EOF
 
 opsctl_ingest() {
   local title tags project source workspace content_type
+  local auto_tag=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --title) title="$2"; shift 2 ;;
@@ -47,6 +52,7 @@ opsctl_ingest() {
       --source) source="$2"; shift 2 ;;
       --workspace) workspace="$2"; shift 2 ;;
       --content-type) content_type="$2"; shift 2 ;;
+      --auto-tag) auto_tag="1"; shift 1 ;;
       *) echo "opsctl ingest: unknown flag '$1'"; return 1 ;;
     esac
   done
@@ -58,6 +64,7 @@ opsctl_ingest() {
   [[ -n "$project"  ]] && qs+="&projectSlug=$(_opsctl_urlencode "$project")"
   [[ -n "$source"   ]] && qs+="&source=$(_opsctl_urlencode "$source")"
   [[ -n "$workspace" ]] && qs+="&workspaceId=$(_opsctl_urlencode "$workspace")"
+  [[ -n "$auto_tag" ]] && qs+="&autoTag=1"
   qs="${qs:1}"
   [[ -n "$qs" ]] && url="${url}?${qs}"
 

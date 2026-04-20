@@ -2,7 +2,7 @@ import "server-only"
 
 import { createHash } from "crypto"
 import { cookies } from "next/headers"
-import { and, eq, isNull } from "drizzle-orm"
+import { and, eq, isNull, sql } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
 import { apiTokens } from "@/lib/server/db/schema"
@@ -88,11 +88,14 @@ export async function authorizeRequest(req: Request): Promise<AuthResult> {
       .limit(1)
     if (rows.length > 0) {
       const row = rows[0]
-      // Best-effort lastUsedAt touch; swallow failures so auth still works
-      // if the write is contended.
+      // Best-effort lastUsedAt touch + usage counter bump; swallow failures
+      // so auth still works if the write is contended.
       await db
         .update(apiTokens)
-        .set({ lastUsedAt: new Date() })
+        .set({
+          lastUsedAt: new Date(),
+          useCount: sql`${apiTokens.useCount} + 1`,
+        })
         .where(eq(apiTokens.id, row.id))
         .catch(() => undefined)
       return {

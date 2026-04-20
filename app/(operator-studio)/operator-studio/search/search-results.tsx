@@ -90,13 +90,16 @@ function SnippetText({
 export function SearchResults() {
   const params = useSearchParams()
   const q = (params.get("q") ?? "").trim()
+  const tag = (params.get("tag") ?? "").trim()
 
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [data, setData] = React.useState<SearchResponse | null>(null)
 
   React.useEffect(() => {
-    if (q.length < 2) {
+    // Either a query (2+ chars) or a tag drives the fetch.
+    const usable = tag.length > 0 || q.length >= 2
+    if (!usable) {
       setData(null)
       setError(null)
       setLoading(false)
@@ -107,10 +110,11 @@ export function SearchResults() {
     setLoading(true)
     setError(null)
 
-    fetch(
-      `/api/operator-studio/search?q=${encodeURIComponent(q)}&scope=all`,
-      { signal: controller.signal }
-    )
+    const url = tag
+      ? `/api/operator-studio/search?tag=${encodeURIComponent(tag)}`
+      : `/api/operator-studio/search?q=${encodeURIComponent(q)}&scope=all`
+
+    fetch(url, { signal: controller.signal })
       .then(async (r) => {
         if (!r.ok) {
           const body = await r.json().catch(() => ({}))
@@ -129,7 +133,7 @@ export function SearchResults() {
       })
 
     return () => controller.abort()
-  }, [q])
+  }, [q, tag])
 
   return (
     <div className="mx-auto w-full max-w-4xl px-6 py-8">
@@ -139,7 +143,11 @@ export function SearchResults() {
           <span className="text-xs uppercase tracking-wider">Search</span>
         </div>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          {q.length >= 2 ? (
+          {tag ? (
+            <>
+              Tag: <span className="text-foreground/80">#{tag}</span>
+            </>
+          ) : q.length >= 2 ? (
             <>
               Results for <span className="text-foreground/80">“{q}”</span>
             </>
@@ -147,7 +155,7 @@ export function SearchResults() {
             "Search Operator Studio"
           )}
         </h1>
-        {q.length < 2 && (
+        {!tag && q.length < 2 && (
           <p className="text-sm text-foreground/80">
             Enter at least two characters in the sidebar search to find
             threads and messages in this workspace.
@@ -233,13 +241,18 @@ function ThreadsSection({ hits }: { hits: ThreadHit[] }) {
                       {REVIEW_STATE_LABELS[t.reviewState]}
                     </Badge>
                     {t.tags.slice(0, 4).map((tag) => (
-                      <Badge
+                      <Link
                         key={tag}
-                        variant="outline"
-                        className="font-normal text-muted-foreground"
+                        href={`/operator-studio/search?tag=${encodeURIComponent(tag)}`}
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        {tag}
-                      </Badge>
+                        <Badge
+                          variant="outline"
+                          className="font-normal text-muted-foreground hover:text-foreground hover:border-foreground/40 cursor-pointer"
+                        >
+                          #{tag}
+                        </Badge>
+                      </Link>
                     ))}
                   </div>
                   {t.snippet && (

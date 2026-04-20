@@ -3,6 +3,7 @@ import { z } from "zod"
 
 import { authorizeRequest } from "@/lib/operator-studio/auth"
 import {
+  findThreadsByTag,
   searchMessages,
   searchThreads,
 } from "@/lib/operator-studio/queries"
@@ -11,10 +12,14 @@ import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 export const dynamic = "force-dynamic"
 
 const querySchema = z.object({
-  q: z.string().trim().min(2).max(256),
+  q: z.string().trim().max(256).optional(),
+  tag: z.string().trim().min(1).max(64).optional(),
   scope: z.enum(["threads", "messages", "all"]).default("all"),
   limit: z.coerce.number().int().min(1).max(100).default(30),
-})
+}).refine(
+  (v) => (v.q && v.q.length >= 2) || (v.tag && v.tag.length >= 1),
+  { message: "Provide q (2+ chars) or tag" }
+)
 
 export async function GET(req: NextRequest) {
   const auth = await authorizeRequest(req)
@@ -24,7 +29,8 @@ export async function GET(req: NextRequest) {
 
   const url = new URL(req.url)
   const parsed = querySchema.safeParse({
-    q: url.searchParams.get("q") ?? "",
+    q: url.searchParams.get("q") ?? undefined,
+    tag: url.searchParams.get("tag") ?? undefined,
     scope: url.searchParams.get("scope") ?? undefined,
     limit: url.searchParams.get("limit") ?? undefined,
   })
@@ -35,19 +41,43 @@ export async function GET(req: NextRequest) {
     )
   }
 
-  const { q, scope, limit } = parsed.data
+  const { q, tag, scope, limit } = parsed.data
   const workspaceId = await getActiveWorkspaceId()
+
+  // Tag-filter branch: exact match against the tags jsonb array. Fast path,
+  // no ts_rank — just list the matching threads, newest first.
+  if (tag) {
+    const threads = await findThreadsByTag(workspaceId, tag, limit)
+    return NextResponse.json({
+      query: null,
+      tag,
+      threads: threads.map((t) => ({
+        id: t.id,
+        workspaceId: t.workspaceId,
+        rawTitle: t.rawTitle,
+        promotedTitle: t.promotedTitle,
+        tags: t.tags,
+        reviewState: t.reviewState,
+        sourceApp: t.sourceApp,
+        importedAt: t.importedAt,
+        rank: null,
+        snippet: null,
+      })),
+      messages: [],
+    })
+  }
 
   const wantThreads = scope === "threads" || scope === "all"
   const wantMessages = scope === "messages" || scope === "all"
 
   const [threads, messages] = await Promise.all([
-    wantThreads ? searchThreads(workspaceId, q, limit) : Promise.resolve([]),
-    wantMessages ? searchMessages(workspaceId, q, limit) : Promise.resolve([]),
+    wantThreads && q ? searchThreads(workspaceId, q, limit) : Promise.resolve([]),
+    wantMessages && q ? searchMessages(workspaceId, q, limit) : Promise.resolve([]),
   ])
 
   return NextResponse.json({
-    query: q,
+    query: q ?? null,
+    tag: null,
     threads: threads.map((t) => ({
       id: t.id,
       workspaceId: t.workspaceId,
