@@ -1,12 +1,24 @@
 // ─── Operator Studio Domain Types ────────────────────────────────────────────
 
-export type OperatorSourceApp =
-  | "codex"
-  | "cursor"
-  | "claude"
-  | "antigravity"
-  | "void"
-  | "manual"
+export const OPERATOR_SOURCE_APPS = [
+  "codex",
+  "cursor",
+  "claude",
+  "claude-code",
+  "chatgpt",
+  "openai",
+  "gemini",
+  "anthropic",
+  "antigravity",
+  "void",
+  "aider",
+  "zed",
+  "copilot",
+  "webhook",
+  "manual",
+] as const
+
+export type OperatorSourceApp = (typeof OPERATOR_SOURCE_APPS)[number]
 
 export type OperatorPrivacyState = "private" | "team"
 
@@ -138,8 +150,17 @@ export const SOURCE_APP_LABELS: Record<OperatorSourceApp, string> = {
   codex: "Codex",
   cursor: "Cursor",
   claude: "Claude",
+  "claude-code": "Claude Code",
+  chatgpt: "ChatGPT",
+  openai: "OpenAI",
+  gemini: "Gemini",
+  anthropic: "Anthropic",
   antigravity: "Antigravity",
   void: "Void",
+  aider: "aider",
+  zed: "Zed",
+  copilot: "Copilot",
+  webhook: "Webhook",
   manual: "Manual",
 }
 
@@ -147,8 +168,17 @@ export const SOURCE_APP_COLORS: Record<OperatorSourceApp, string> = {
   codex: "bg-orange-500/15 text-orange-700 dark:text-orange-400",
   cursor: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
   claude: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+  "claude-code": "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+  chatgpt: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  openai: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  gemini: "bg-sky-500/15 text-sky-700 dark:text-sky-400",
+  anthropic: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   antigravity: "bg-purple-500/15 text-purple-700 dark:text-purple-400",
   void: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-400",
+  aider: "bg-pink-500/15 text-pink-700 dark:text-pink-400",
+  zed: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-400",
+  copilot: "bg-slate-500/15 text-slate-700 dark:text-slate-400",
+  webhook: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400",
   manual: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400",
 }
 

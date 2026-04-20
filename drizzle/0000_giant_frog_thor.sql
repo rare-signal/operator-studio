@@ -1,3 +1,16 @@
+CREATE TABLE "api_tokens" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workspace_id" text,
+	"label" text NOT NULL,
+	"display_name" text NOT NULL,
+	"token_hash" text NOT NULL,
+	"token_prefix" text NOT NULL,
+	"created_by" text NOT NULL,
+	"created_at" timestamp with time zone NOT NULL,
+	"last_used_at" timestamp with time zone,
+	"revoked_at" timestamp with time zone
+);
+--> statement-breakpoint
 CREATE TABLE "operator_chat_messages" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -92,6 +105,20 @@ CREATE TABLE "operator_threads" (
 	"updated_at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "webhook_subscriptions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workspace_id" text NOT NULL,
+	"label" text NOT NULL,
+	"url" text NOT NULL,
+	"secret" text,
+	"events" text,
+	"created_by" text NOT NULL,
+	"created_at" timestamp with time zone NOT NULL,
+	"last_delivered_at" timestamp with time zone,
+	"last_status" integer,
+	"disabled_at" timestamp with time zone
+);
+--> statement-breakpoint
 CREATE TABLE "workspaces" (
 	"id" text PRIMARY KEY NOT NULL,
 	"label" text NOT NULL,
@@ -100,12 +127,16 @@ CREATE TABLE "workspaces" (
 	"updated_at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint
+ALTER TABLE "api_tokens" ADD CONSTRAINT "api_tokens_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operator_chat_messages" ADD CONSTRAINT "operator_chat_messages_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operator_chat_sessions" ADD CONSTRAINT "operator_chat_sessions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operator_import_runs" ADD CONSTRAINT "operator_import_runs_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operator_thread_messages" ADD CONSTRAINT "operator_thread_messages_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operator_thread_summaries" ADD CONSTRAINT "operator_thread_summaries_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "operator_threads" ADD CONSTRAINT "operator_threads_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "webhook_subscriptions" ADD CONSTRAINT "webhook_subscriptions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "idx_api_tokens_hash" ON "api_tokens" USING btree ("token_hash");--> statement-breakpoint
+CREATE INDEX "idx_api_tokens_workspace" ON "api_tokens" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "idx_os_chat_messages_session" ON "operator_chat_messages" USING btree ("session_id","created_at");--> statement-breakpoint
 CREATE INDEX "idx_os_chat_messages_workspace" ON "operator_chat_messages" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "idx_os_sessions_thread" ON "operator_chat_sessions" USING btree ("thread_id");--> statement-breakpoint
@@ -119,4 +150,6 @@ CREATE INDEX "idx_os_summaries_workspace" ON "operator_thread_summaries" USING b
 CREATE INDEX "idx_os_threads_workspace" ON "operator_threads" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "idx_os_threads_workspace_state" ON "operator_threads" USING btree ("workspace_id","review_state");--> statement-breakpoint
 CREATE INDEX "idx_os_threads_workspace_source" ON "operator_threads" USING btree ("workspace_id","source_app");--> statement-breakpoint
-CREATE INDEX "idx_os_threads_imported_at" ON "operator_threads" USING btree ("imported_at");
+CREATE INDEX "idx_os_threads_imported_at" ON "operator_threads" USING btree ("imported_at");--> statement-breakpoint
+CREATE UNIQUE INDEX "idx_os_threads_workspace_source_key" ON "operator_threads" USING btree ("workspace_id","source_app","source_thread_key");--> statement-breakpoint
+CREATE INDEX "idx_webhooks_workspace" ON "webhook_subscriptions" USING btree ("workspace_id");

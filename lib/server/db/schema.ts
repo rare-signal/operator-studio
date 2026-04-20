@@ -13,6 +13,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core"
 
 export const workspaces = pgTable("workspaces", {
@@ -63,6 +64,13 @@ export const operatorThreads = pgTable(
     index("idx_os_threads_workspace_state").on(t.workspaceId, t.reviewState),
     index("idx_os_threads_workspace_source").on(t.workspaceId, t.sourceApp),
     index("idx_os_threads_imported_at").on(t.importedAt),
+    // Dedupe: within a single workspace, the same upstream thread key should
+    // only land once. Nulls are allowed for manual pastes that have no key.
+    uniqueIndex("idx_os_threads_workspace_source_key").on(
+      t.workspaceId,
+      t.sourceApp,
+      t.sourceThreadKey
+    ),
   ]
 )
 
@@ -175,6 +183,66 @@ export const operatorImportRuns = pgTable(
   ]
 )
 
+// ─── API tokens ─────────────────────────────────────────────────────────────
+//
+// Per-user bearer tokens for machine-facing routes. Tokens are stored as
+// SHA-256 hashes; the plaintext is shown once at creation time. Each token
+// carries a `display_name` which becomes the `importedBy` / `promotedBy`
+// attribution when the token is used — i.e. calls authenticated with Alex's
+// token are attributable to Alex regardless of what the caller claims.
+
+export const apiTokens = pgTable(
+  "api_tokens",
+  {
+    id: text("id").primaryKey(),
+    // Optional workspace scope. When null, the token can reach any workspace
+    // the active cookie / request params select. When set, it's pinned.
+    workspaceId: text("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
+    label: text("label").notNull(),
+    displayName: text("display_name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    tokenPrefix: text("token_prefix").notNull(), // first 8 chars for display
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("idx_api_tokens_hash").on(t.tokenHash),
+    index("idx_api_tokens_workspace").on(t.workspaceId),
+  ]
+)
+
+// ─── Webhook subscriptions ──────────────────────────────────────────────────
+//
+// Outbound webhooks fired when notable events happen (thread.promoted,
+// thread.imported, etc). Secrets are shared with the receiver for HMAC
+// signature verification.
+
+export const webhookSubscriptions = pgTable(
+  "webhook_subscriptions",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    url: text("url").notNull(),
+    secret: text("secret"),
+    // Comma-separated event names the receiver cares about, e.g.
+    // "thread.promoted,thread.imported". Null = all events.
+    events: text("events"),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    lastDeliveredAt: timestamp("last_delivered_at", { withTimezone: true }),
+    lastStatus: integer("last_status"),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  },
+  (t) => [index("idx_webhooks_workspace").on(t.workspaceId)]
+)
+
 export const schema = {
   workspaces,
   operatorThreads,
@@ -183,4 +251,6 @@ export const schema = {
   operatorChatSessions,
   operatorChatMessages,
   operatorImportRuns,
+  apiTokens,
+  webhookSubscriptions,
 }

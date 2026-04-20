@@ -2,7 +2,7 @@ import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
-import { isAuthenticated } from "@/lib/operator-studio/auth"
+import { authorizeRequest } from "@/lib/operator-studio/auth"
 import {
   ACTIVE_WORKSPACE_COOKIE,
   getActiveWorkspace,
@@ -11,9 +11,10 @@ import {
 
 export const dynamic = "force-dynamic"
 
-export async function GET() {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+export async function GET(req: Request) {
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspace = await getActiveWorkspace()
   return NextResponse.json({ workspace })
@@ -24,8 +25,9 @@ const postSchema = z.object({
 })
 
 export async function POST(request: Request) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(request)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
 
   const raw = await request.json().catch(() => null)

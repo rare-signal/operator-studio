@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { z } from "zod"
 
-import { isAuthenticated, getDisplayName } from "@/lib/operator-studio/auth"
+import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import {
   importFromPayload,
@@ -9,18 +9,14 @@ import {
   importSelectedFiles,
 } from "@/lib/operator-studio/importers"
 import { getRecentImportRuns } from "@/lib/operator-studio/queries"
-import type { OperatorSourceApp } from "@/lib/operator-studio/types"
+import {
+  OPERATOR_SOURCE_APPS,
+  type OperatorSourceApp,
+} from "@/lib/operator-studio/types"
 
 export const dynamic = "force-dynamic"
 
-const sourceApps = [
-  "codex",
-  "cursor",
-  "claude",
-  "antigravity",
-  "void",
-  "manual",
-] as const
+const sourceApps = OPERATOR_SOURCE_APPS
 
 const postSchema = z.union([
   z.object({
@@ -54,9 +50,10 @@ const postSchema = z.union([
   }),
 ])
 
-export async function GET() {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+export async function GET(req: Request) {
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const runs = await getRecentImportRuns(workspaceId)
@@ -64,8 +61,9 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const raw = await req.json().catch(() => null)

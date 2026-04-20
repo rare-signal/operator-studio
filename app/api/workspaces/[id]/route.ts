@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
-import { isAuthenticated } from "@/lib/operator-studio/auth"
+import { authorizeRequest } from "@/lib/operator-studio/auth"
 import {
   deleteWorkspace,
   getWorkspaceById,
@@ -18,9 +18,10 @@ const patchSchema = z.object({
   label: z.string().trim().min(1).max(128),
 })
 
-export async function GET(_request: Request, { params }: RouteContext) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+export async function GET(request: Request, { params }: RouteContext) {
+  const auth = await authorizeRequest(request)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const { id } = await params
   const workspace = await getWorkspaceById(id)
@@ -31,8 +32,9 @@ export async function GET(_request: Request, { params }: RouteContext) {
 }
 
 export async function PATCH(request: Request, { params }: RouteContext) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(request)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const { id } = await params
 
@@ -52,9 +54,10 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   return NextResponse.json({ ok: true, workspace })
 }
 
-export async function DELETE(_request: Request, { params }: RouteContext) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+export async function DELETE(request: Request, { params }: RouteContext) {
+  const auth = await authorizeRequest(request)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const { id } = await params
 

@@ -14,48 +14,117 @@ type SourceAppDisplay = {
   chipClassName: string
 }
 
+const warmAmber =
+  "border-[#f0d7a6] bg-[#fff7e4] text-[#8e5d17] dark:border-amber-900/50 dark:bg-amber-950/25 dark:text-amber-100"
+const warmOrange =
+  "border-[#f0d7bf] bg-[#fff5ea] text-[#8f5d29] dark:border-orange-900/50 dark:bg-orange-950/25 dark:text-orange-100"
+const coolSky =
+  "border-[#cfe0f5] bg-[#eef6ff] text-[#315f92] dark:border-sky-900/50 dark:bg-sky-950/25 dark:text-sky-100"
+const coolTeal =
+  "border-[#c7e7de] bg-[#eefbf8] text-[#0f6f68] dark:border-teal-900/50 dark:bg-teal-950/25 dark:text-teal-100"
+const coolCyan =
+  "border-[#cde6ef] bg-[#eef9fc] text-[#245e74] dark:border-cyan-900/50 dark:bg-cyan-950/25 dark:text-cyan-100"
+const coolEmerald =
+  "border-[#c7e9d4] bg-[#eefbf3] text-[#146c43] dark:border-emerald-900/50 dark:bg-emerald-950/25 dark:text-emerald-100"
+const coolIndigo =
+  "border-[#cfd1f4] bg-[#eeeffd] text-[#393e91] dark:border-indigo-900/50 dark:bg-indigo-950/25 dark:text-indigo-100"
+const warmPink =
+  "border-[#f2c7dc] bg-[#fdeef4] text-[#8a3565] dark:border-pink-900/50 dark:bg-pink-950/25 dark:text-pink-100"
+const warmYellow =
+  "border-[#ecdfa8] bg-[#fdf8e0] text-[#7a5c12] dark:border-yellow-900/50 dark:bg-yellow-950/25 dark:text-yellow-100"
+const neutral =
+  "border-border/70 bg-muted/70 text-muted-foreground dark:bg-muted/40"
+
 const SOURCE_APP_DISPLAY: Record<OperatorSourceApp, SourceAppDisplay> = {
   codex: {
     label: SOURCE_APP_LABELS.codex,
     shortLabel: "Codex",
     iconSrc: "/operator-studio/source-apps/source-app-codex.png",
-    chipClassName:
-      "border-[#f0d7bf] bg-[#fff5ea] text-[#8f5d29] dark:border-orange-900/50 dark:bg-orange-950/25 dark:text-orange-100",
+    chipClassName: warmOrange,
   },
   cursor: {
     label: SOURCE_APP_LABELS.cursor,
     shortLabel: "Cursor",
     iconSrc: "/operator-studio/source-apps/source-app-cursor.png",
-    chipClassName:
-      "border-[#cfe0f5] bg-[#eef6ff] text-[#315f92] dark:border-sky-900/50 dark:bg-sky-950/25 dark:text-sky-100",
+    chipClassName: coolSky,
   },
   claude: {
     label: SOURCE_APP_LABELS.claude,
     shortLabel: "Claude",
     iconSrc: "/operator-studio/source-apps/source-app-claude.png",
-    chipClassName:
-      "border-[#f0d7a6] bg-[#fff7e4] text-[#8e5d17] dark:border-amber-900/50 dark:bg-amber-950/25 dark:text-amber-100",
+    chipClassName: warmAmber,
+  },
+  "claude-code": {
+    label: SOURCE_APP_LABELS["claude-code"],
+    shortLabel: "C-Code",
+    iconSrc: "/operator-studio/source-apps/source-app-claude.png",
+    chipClassName: warmAmber,
+  },
+  chatgpt: {
+    label: SOURCE_APP_LABELS.chatgpt,
+    shortLabel: "CGPT",
+    iconSrc: null,
+    chipClassName: coolEmerald,
+  },
+  openai: {
+    label: SOURCE_APP_LABELS.openai,
+    shortLabel: "OAI",
+    iconSrc: null,
+    chipClassName: coolEmerald,
+  },
+  gemini: {
+    label: SOURCE_APP_LABELS.gemini,
+    shortLabel: "Gem",
+    iconSrc: null,
+    chipClassName: coolSky,
+  },
+  anthropic: {
+    label: SOURCE_APP_LABELS.anthropic,
+    shortLabel: "Anthr",
+    iconSrc: null,
+    chipClassName: warmAmber,
   },
   antigravity: {
     label: SOURCE_APP_LABELS.antigravity,
     shortLabel: "Anti-G",
     iconSrc: "/operator-studio/source-apps/source-app-antigravity.png",
-    chipClassName:
-      "border-[#c7e7de] bg-[#eefbf8] text-[#0f6f68] dark:border-teal-900/50 dark:bg-teal-950/25 dark:text-teal-100",
+    chipClassName: coolTeal,
   },
   void: {
     label: SOURCE_APP_LABELS.void,
     shortLabel: "Void",
     iconSrc: "/operator-studio/source-apps/source-app-void.png",
-    chipClassName:
-      "border-[#cde6ef] bg-[#eef9fc] text-[#245e74] dark:border-cyan-900/50 dark:bg-cyan-950/25 dark:text-cyan-100",
+    chipClassName: coolCyan,
+  },
+  aider: {
+    label: SOURCE_APP_LABELS.aider,
+    shortLabel: "Aider",
+    iconSrc: null,
+    chipClassName: warmPink,
+  },
+  zed: {
+    label: SOURCE_APP_LABELS.zed,
+    shortLabel: "Zed",
+    iconSrc: null,
+    chipClassName: coolIndigo,
+  },
+  copilot: {
+    label: SOURCE_APP_LABELS.copilot,
+    shortLabel: "CoPi",
+    iconSrc: null,
+    chipClassName: neutral,
+  },
+  webhook: {
+    label: SOURCE_APP_LABELS.webhook,
+    shortLabel: "Hook",
+    iconSrc: null,
+    chipClassName: warmYellow,
   },
   manual: {
     label: SOURCE_APP_LABELS.manual,
     shortLabel: "Manual",
     iconSrc: null,
-    chipClassName:
-      "border-border/70 bg-muted/70 text-muted-foreground dark:bg-muted/40",
+    chipClassName: neutral,
   },
 }
 
@@ -65,8 +134,8 @@ export const IMPORT_SHOWCASE_LANES: Array<Exclude<OperatorSourceApp, "manual">> 
   "claude",
   "codex",
   "cursor",
-  "antigravity",
-  "void",
+  "chatgpt",
+  "gemini",
 ]
 
 function getSourceDisplay(source: string): SourceAppDisplay {

@@ -1,27 +1,30 @@
+import "server-only"
+
+import { createHash } from "crypto"
 import { cookies } from "next/headers"
+import { and, eq, isNull } from "drizzle-orm"
+
+import { getDb } from "@/lib/server/db/client"
+import { apiTokens } from "@/lib/server/db/schema"
 
 /**
- * Minimal auth helpers for the bundled dev gate.
- *
- * When you swap in a real auth provider (Auth.js, Clerk, WorkOS, etc), these
- * are the seams: replace the bodies with lookups against your provider's
- * session. The rest of the app only talks to these three functions.
+ * Auth seams.
  *
  * - `isAuthenticated()` — is this cookie-bearing request allowed to hit
- *   protected UI-side API routes? Used by the in-app dashboard, chat, etc.
- * - `isApiAuthorized(req)` — is this request allowed to hit machine-facing
- *   endpoints (the `/ingest` pipeline)? Accepts either a valid session
- *   cookie OR a bearer token matching `OPERATOR_STUDIO_INGEST_TOKEN`. This
- *   is the seam for IDE / CLI / automation callers who don't have cookies.
- * - `getDisplayName()` — what name should we attribute an operator's
- *   imports, promotions, and continuation chats to? Returns `null` to let
- *   the client-side identity modal prompt for a self-chosen display name.
+ *   the in-app UI? Used by page loaders / SSR.
+ * - `authorizeRequest(req)` — is this request allowed to hit a machine-
+ *   facing API route? Returns a discriminated result carrying the
+ *   resolved identity so the route can attribute imports / promotions /
+ *   chats to the right person regardless of what the client claims.
+ * - `getDisplayName()` — cookie-stored self-attested name, for UI
+ *   attribution when no bearer token is present.
  *
- * The bundled implementation is a single shared password + a self-attested
- * display name cookie + an optional static bearer token. It is a development
- * convenience, not a security boundary — do not deploy public-facing without
- * swapping it.
+ * When you swap in a real auth provider, replace the bodies of these
+ * three. The rest of the app only talks to them.
  */
+
+// ─── Cookie-based UI auth (unchanged) ───────────────────────────────────────
+
 export async function isAuthenticated(): Promise<boolean> {
   const configured = process.env.OPERATOR_STUDIO_PASSWORD?.trim()
   if (!configured) return true
@@ -36,39 +39,124 @@ export async function getDisplayName(): Promise<string | null> {
   return value && value.length > 0 ? value : null
 }
 
+// ─── Machine-facing auth ────────────────────────────────────────────────────
+
+export type AuthResult =
+  | { ok: false; reason: string }
+  | {
+      ok: true
+      method: "open" | "cookie" | "bearer" | "legacy-token"
+      // Identity to attribute actions to. For bearer tokens, this is the
+      // token's `display_name`. For cookies, it's the cookie name. Null
+      // means "no strong identity; attribute to whatever the caller claims
+      // or fall back to 'operator'."
+      identity: string | null
+      tokenId: string | null
+    }
+
 /**
- * Authorize a machine-facing request.
+ * Resolve a request's auth. Accepts:
  *
- * Accepts one of:
- *   1. A valid `operator_studio_auth` session cookie (same gate as the UI).
- *   2. A `Authorization: Bearer <token>` header matching
- *      `OPERATOR_STUDIO_INGEST_TOKEN` (constant-time compared).
- *   3. No auth at all, when BOTH the password gate is off AND no ingest
- *      token is configured — the "open local dev" default.
+ *   1. `Authorization: Bearer <token>` where `<token>` either matches a row
+ *      in `api_tokens` (revoked_at IS NULL) OR matches the legacy
+ *      `OPERATOR_STUDIO_INGEST_TOKEN` shared secret. Per-user tokens win
+ *      over the legacy token.
+ *   2. A valid `operator_studio_auth` session cookie (same as the UI gate).
+ *   3. Fully open — neither password gate nor ingest token configured.
  */
-export async function isApiAuthorized(req: Request): Promise<boolean> {
+export async function authorizeRequest(req: Request): Promise<AuthResult> {
   const passwordSet = !!process.env.OPERATOR_STUDIO_PASSWORD?.trim()
-  const tokenSet = !!process.env.OPERATOR_STUDIO_INGEST_TOKEN?.trim()
+  const legacyTokenSet = !!process.env.OPERATOR_STUDIO_INGEST_TOKEN?.trim()
 
-  // Fully open: no password, no ingest token. Local dev default.
-  if (!passwordSet && !tokenSet) return true
+  // 1. Bearer path.
+  const header = req.headers.get("authorization") ?? ""
+  const match = header.match(/^Bearer\s+(.+)$/i)
+  const presented = match?.[1]?.trim()
 
-  // Bearer token path.
-  if (tokenSet) {
-    const header = req.headers.get("authorization") ?? ""
-    const match = header.match(/^Bearer\s+(.+)$/i)
-    const presented = match?.[1]?.trim()
-    const expected = process.env.OPERATOR_STUDIO_INGEST_TOKEN!.trim()
-    if (presented && constantTimeEqual(presented, expected)) return true
+  if (presented) {
+    // DB-backed per-user token?
+    const hash = sha256(presented)
+    const db = getDb()
+    const rows = await db
+      .select()
+      .from(apiTokens)
+      .where(and(eq(apiTokens.tokenHash, hash), isNull(apiTokens.revokedAt)))
+      .limit(1)
+    if (rows.length > 0) {
+      const row = rows[0]
+      // Best-effort lastUsedAt touch; swallow failures so auth still works
+      // if the write is contended.
+      await db
+        .update(apiTokens)
+        .set({ lastUsedAt: new Date() })
+        .where(eq(apiTokens.id, row.id))
+        .catch(() => undefined)
+      return {
+        ok: true,
+        method: "bearer",
+        identity: row.displayName,
+        tokenId: row.id,
+      }
+    }
+
+    // Legacy shared secret?
+    if (legacyTokenSet) {
+      const expected = process.env.OPERATOR_STUDIO_INGEST_TOKEN!.trim()
+      if (constantTimeEqual(presented, expected)) {
+        return {
+          ok: true,
+          method: "legacy-token",
+          identity: null,
+          tokenId: null,
+        }
+      }
+    }
+
+    return { ok: false, reason: "Invalid bearer token" }
   }
 
-  // Session cookie path.
+  // 2. Cookie path.
   if (passwordSet) {
     const jar = await cookies()
-    if (jar.get("operator_studio_auth")?.value === "ok") return true
+    if (jar.get("operator_studio_auth")?.value === "ok") {
+      const reviewer = jar.get("operator_studio_reviewer")?.value?.trim()
+      return {
+        ok: true,
+        method: "cookie",
+        identity: reviewer && reviewer.length > 0 ? reviewer : null,
+        tokenId: null,
+      }
+    }
+    return { ok: false, reason: "Not signed in" }
   }
 
-  return false
+  // 3. Open mode — password gate off, no bearer presented.
+  // If an ingest token is configured but not passed, reject.
+  if (legacyTokenSet) {
+    return { ok: false, reason: "Bearer token required" }
+  }
+
+  // Truly open: local dev with neither gate set.
+  const jar = await cookies()
+  const reviewer = jar.get("operator_studio_reviewer")?.value?.trim()
+  return {
+    ok: true,
+    method: "open",
+    identity: reviewer && reviewer.length > 0 ? reviewer : null,
+    tokenId: null,
+  }
+}
+
+/** Back-compat boolean form. Prefer `authorizeRequest` for new code. */
+export async function isApiAuthorized(req: Request): Promise<boolean> {
+  const r = await authorizeRequest(req)
+  return r.ok
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+export function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex")
 }
 
 function constantTimeEqual(a: string, b: string): boolean {

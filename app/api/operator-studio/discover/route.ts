@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
 
-import { isAuthenticated } from "@/lib/operator-studio/auth"
+import { authorizeRequest } from "@/lib/operator-studio/auth"
 import {
   discoverClaudeSessions,
   type ParsedClaudeSession,
@@ -42,8 +42,9 @@ function toPreview(
 }
 
 export async function GET(req: NextRequest) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
 
   const source = req.nextUrl.searchParams.get(

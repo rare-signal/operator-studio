@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { z } from "zod"
 
-import { isAuthenticated, getDisplayName } from "@/lib/operator-studio/auth"
+import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
+import { emitWebhookEvent } from "@/lib/operator-studio/webhooks"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import {
   forkThread,
@@ -37,11 +38,12 @@ const patchSchema = z.union([
 ])
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ threadId: string }> }
 ) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const { threadId } = await params
@@ -77,8 +79,9 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ threadId: string }> }
 ) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const { threadId } = await params
@@ -93,9 +96,13 @@ export async function PATCH(
   const body = parsed.data
 
   if ("action" in body && body.action === "fork") {
+    // Identity precedence: bearer token displayName > cookie displayName
+    // > body claim > fallback. Bearer tokens beat anything the body says so
+    // bots can't spoof humans.
     const forkedBy =
-      body.forkedBy?.trim() ||
-      (await getDisplayName()) ||
+      auth.identity ??
+      (await getDisplayName()) ??
+      body.forkedBy?.trim() ??
       "operator"
     const fork = await forkThread(workspaceId, threadId, forkedBy)
     return NextResponse.json({ ok: true, fork })
@@ -108,6 +115,16 @@ export async function PATCH(
       whyItMatters: body.whyItMatters,
       tags: body.tags,
       projectSlug: body.projectSlug,
+    })
+    const promotedBy = auth.identity ?? (await getDisplayName()) ?? "operator"
+    emitWebhookEvent(workspaceId, "thread.promoted", {
+      threadId,
+      promotedTitle: body.promotedTitle,
+      promotedSummary: body.promotedSummary,
+      whyItMatters: body.whyItMatters ?? null,
+      tags: body.tags ?? [],
+      projectSlug: body.projectSlug ?? null,
+      promotedBy,
     })
     return NextResponse.json({ ok: true })
   }
@@ -125,11 +142,12 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ threadId: string }> }
 ) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const { threadId } = await params

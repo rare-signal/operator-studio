@@ -1,24 +1,18 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
-import { authorizeRequest } from "@/lib/operator-studio/auth"
+import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
 import {
-  createWorkspace,
-  listWorkspaces,
-} from "@/lib/operator-studio/workspaces"
+  createApiToken,
+  listApiTokens,
+} from "@/lib/operator-studio/tokens"
 
 export const dynamic = "force-dynamic"
 
 const createSchema = z.object({
-  id: z
-    .string()
-    .trim()
-    .min(1)
-    .max(64)
-    .regex(/^[a-z0-9][a-z0-9-]*$/i, {
-      message: "id must be alphanumeric with dashes",
-    }),
   label: z.string().trim().min(1).max(128),
+  displayName: z.string().trim().min(1).max(128),
+  workspaceId: z.string().trim().min(1).max(64).nullish(),
 })
 
 export async function GET(req: Request) {
@@ -26,8 +20,12 @@ export async function GET(req: Request) {
   if (!auth.ok) {
     return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
-  const workspaces = await listWorkspaces()
-  return NextResponse.json({ workspaces })
+  const url = new URL(req.url)
+  const scope = url.searchParams.get("workspaceId")
+  const rows = await listApiTokens(
+    scope === null ? undefined : scope || null
+  )
+  return NextResponse.json({ tokens: rows })
 }
 
 export async function POST(request: Request) {
@@ -44,13 +42,7 @@ export async function POST(request: Request) {
       { status: 400 }
     )
   }
-
-  try {
-    const workspace = await createWorkspace(parsed.data)
-    return NextResponse.json({ ok: true, workspace })
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to create workspace"
-    return NextResponse.json({ error: message }, { status: 400 })
-  }
+  const createdBy = auth.identity ?? (await getDisplayName()) ?? "admin"
+  const created = await createApiToken({ ...parsed.data, createdBy })
+  return NextResponse.json({ ok: true, token: created })
 }

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { z } from "zod"
 
-import { isAuthenticated, getDisplayName } from "@/lib/operator-studio/auth"
+import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import {
   deleteMessage,
@@ -44,8 +44,9 @@ const deleteSchema = z.object({
 })
 
 export async function GET(req: NextRequest) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const promoted = new URL(req.url).searchParams.get("promoted")
@@ -59,8 +60,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const raw = await req.json().catch(() => null)
@@ -106,8 +108,9 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
   const workspaceId = await getActiveWorkspaceId()
   const raw = await req.json().catch(() => null)

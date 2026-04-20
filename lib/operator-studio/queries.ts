@@ -188,6 +188,26 @@ export async function getThreadsBySource(
   return rows.map(toThread)
 }
 
+export async function findThreadBySourceKey(
+  workspaceId: string,
+  sourceApp: string,
+  sourceThreadKey: string
+): Promise<OperatorThread | null> {
+  const db = getDb()
+  const rows = await db
+    .select()
+    .from(operatorThreads)
+    .where(
+      and(
+        eq(operatorThreads.workspaceId, workspaceId),
+        eq(operatorThreads.sourceApp, sourceApp),
+        eq(operatorThreads.sourceThreadKey, sourceThreadKey)
+      )
+    )
+    .limit(1)
+  return rows[0] ? toThread(rows[0]) : null
+}
+
 export async function getThreadById(
   workspaceId: string,
   id: string

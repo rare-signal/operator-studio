@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { z } from "zod"
 
-import { isAuthenticated } from "@/lib/operator-studio/auth"
+import { authorizeRequest } from "@/lib/operator-studio/auth"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import {
   getDashboardStats,
@@ -9,9 +9,10 @@ import {
   getThreadsByState,
   getVisibleThreads,
 } from "@/lib/operator-studio/queries"
-import type {
-  OperatorReviewState,
-  OperatorSourceApp,
+import {
+  OPERATOR_SOURCE_APPS,
+  type OperatorReviewState,
+  type OperatorSourceApp,
 } from "@/lib/operator-studio/types"
 
 export const dynamic = "force-dynamic"
@@ -22,18 +23,12 @@ const reviewStates = new Set<OperatorReviewState>([
   "promoted",
   "archived",
 ])
-const sourceApps = new Set<OperatorSourceApp>([
-  "codex",
-  "cursor",
-  "claude",
-  "antigravity",
-  "void",
-  "manual",
-])
+const sourceApps = new Set<OperatorSourceApp>(OPERATOR_SOURCE_APPS)
 
 export async function GET(req: NextRequest) {
-  if (!(await isAuthenticated())) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
 
   const workspaceId = await getActiveWorkspaceId()

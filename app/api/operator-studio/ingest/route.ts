@@ -24,10 +24,10 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server"
-import { randomUUID } from "crypto"
+import { createHash, randomUUID } from "crypto"
 import { z } from "zod"
 
-import { getDisplayName, isApiAuthorized } from "@/lib/operator-studio/auth"
+import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
 import {
   ACTIVE_WORKSPACE_COOKIE,
   GLOBAL_WORKSPACE_ID,
@@ -36,12 +36,20 @@ import {
 import {
   completeImportRun,
   createImportRun,
+  findThreadBySourceKey,
   insertThread,
   insertThreadMessages,
 } from "@/lib/operator-studio/queries"
-import { parseUniversal } from "@/lib/operator-studio/importers/universal-parser"
+import {
+  parseUniversal,
+  type DetectedFormat,
+} from "@/lib/operator-studio/importers/universal-parser"
 import { deriveTitle } from "@/lib/operator-studio/importers/generate-title"
-import type { OperatorSourceApp } from "@/lib/operator-studio/types"
+import { emitWebhookEvent } from "@/lib/operator-studio/webhooks"
+import {
+  OPERATOR_SOURCE_APPS,
+  type OperatorSourceApp,
+} from "@/lib/operator-studio/types"
 import { cookies } from "next/headers"
 
 export const dynamic = "force-dynamic"
@@ -50,19 +58,26 @@ const querySchema = z.object({
   title: z.string().trim().max(512).optional(),
   tags: z.string().trim().max(1024).optional(),
   projectSlug: z.string().trim().max(128).optional(),
-  source: z
-    .enum(["codex", "cursor", "claude", "antigravity", "void", "manual"])
-    .optional(),
+  source: z.enum(OPERATOR_SOURCE_APPS).optional(),
   importedBy: z.string().trim().min(1).max(128).optional(),
   workspaceId: z.string().trim().min(1).max(64).optional(),
+  // Stable dedupe key. Callers that have an upstream thread id (e.g.
+  // "claude-session-abc" or "github-pr-123") should pass it so repeated
+  // POSTs of the same conversation return the original thread instead of
+  // creating duplicates. If omitted, the route derives a key from a content
+  // hash of the messages.
+  dedupeKey: z.string().trim().max(256).optional(),
+  // Explicitly disable dedupe (rarely wanted, but useful for one-off tests).
+  allowDuplicates: z.string().optional(),
 })
 
 export async function POST(req: NextRequest) {
-  if (!(await isApiAuthorized(req))) {
+  const auth = await authorizeRequest(req)
+  if (!auth.ok) {
     return jsonError(
       401,
-      "Unauthorized",
-      "Provide Authorization: Bearer <OPERATOR_STUDIO_INGEST_TOKEN> or sign in with the session cookie."
+      auth.reason,
+      "Provide Authorization: Bearer <token> or sign in with the session cookie. Mint per-user tokens in the Admin page, or set OPERATOR_STUDIO_INGEST_TOKEN for a shared legacy token."
     )
   }
 
@@ -109,9 +124,19 @@ export async function POST(req: NextRequest) {
   }
 
   // Build the thread.
+  // Identity precedence: bearer token's display_name wins (bots can't
+  // claim another identity); else the cookie's display name; else the
+  // query param; else "api". This is the multiplayer audit story —
+  // `importedBy` is what the token says, not what the caller claims.
   const importedBy =
-    query.importedBy?.trim() || (await getDisplayName()) || "api"
-  const sourceApp: OperatorSourceApp = query.source ?? "manual"
+    auth.identity ??
+    (await getDisplayName()) ??
+    query.importedBy?.trim() ??
+    "api"
+  // If the caller didn't specify a source, infer it from the detected format
+  // so the "By Source" grouping reflects reality.
+  const sourceApp: OperatorSourceApp =
+    query.source ?? sourceFromDetectedFormat(parsed.detectedFormat)
   const now = new Date()
   const threadId = `thread-${randomUUID()}`
   const runId = `run-ingest-${Date.now()}`
@@ -122,6 +147,34 @@ export async function POST(req: NextRequest) {
     (await deriveTitle(parsed.messages.map((m) => ({ role: m.role, content: m.content }))))
 
   const tags = parseTags(query.tags)
+
+  // Dedupe. The derived key is a content hash of the messages so two identical
+  // pastes collide even without an explicit upstream thread id. Callers with
+  // a stable external id should pass `dedupeKey`.
+  const allowDuplicates = query.allowDuplicates === "1" || query.allowDuplicates === "true"
+  const sourceThreadKey = allowDuplicates
+    ? null
+    : query.dedupeKey?.trim() || computeContentHash(parsed.messages)
+
+  if (sourceThreadKey) {
+    const existing = await findThreadBySourceKey(workspaceId, sourceApp, sourceThreadKey)
+    if (existing) {
+      return NextResponse.json({
+        ok: true,
+        deduped: true,
+        threadId: existing.id,
+        workspaceId: existing.workspaceId,
+        detectedFormat: parsed.detectedFormat,
+        messageCount: existing.messageCount,
+        title: existing.promotedTitle ?? existing.rawTitle,
+        notes: [
+          "Content already present — returning the existing thread id. Pass ?allowDuplicates=1 to force a new thread.",
+          ...parsed.notes,
+        ],
+        viewUrl: `/operator-studio/threads/${existing.id}`,
+      })
+    }
+  }
 
   // Track the import run.
   await createImportRun({
@@ -136,7 +189,7 @@ export async function POST(req: NextRequest) {
       id: threadId,
       workspaceId,
       sourceApp,
-      sourceThreadKey: null,
+      sourceThreadKey,
       sourceLocator: null,
       importedBy,
       importedAt: now,
@@ -180,6 +233,17 @@ export async function POST(req: NextRequest) {
     await insertThreadMessages(msgs)
     await completeImportRun(workspaceId, runId, 1)
 
+    emitWebhookEvent(workspaceId, "thread.imported", {
+      threadId,
+      title,
+      source: sourceApp,
+      detectedFormat: parsed.detectedFormat,
+      messageCount: parsed.messages.length,
+      importedBy,
+      tags,
+      projectSlug: query.projectSlug?.trim() || null,
+    })
+
     return NextResponse.json({
       ok: true,
       threadId,
@@ -211,6 +275,43 @@ async function resolveWorkspaceId(explicit: string | undefined): Promise<string>
     if (target) return target.id
   }
   return GLOBAL_WORKSPACE_ID
+}
+
+function computeContentHash(
+  messages: Array<{ role: string; content: string }>
+): string {
+  const h = createHash("sha256")
+  for (const m of messages) {
+    h.update(m.role)
+    h.update("\0")
+    h.update(m.content)
+    h.update("\0\0")
+  }
+  return `sha256:${h.digest("hex")}`
+}
+
+function sourceFromDetectedFormat(format: DetectedFormat): OperatorSourceApp {
+  switch (format) {
+    case "gemini-generate":
+    case "gemini-conversation":
+      return "gemini"
+    case "openai-chat":
+      return "openai"
+    case "anthropic-messages":
+      return "anthropic"
+    case "chatgpt-share":
+      return "chatgpt"
+    case "operator-studio-native":
+    case "messages-array":
+    case "role-content-array":
+    case "jsonl-messages":
+    case "labeled-transcript":
+    case "markdown-heading-split":
+    case "raw-blob":
+      return "manual"
+    default:
+      return "manual"
+  }
 }
 
 function parseTags(raw: string | undefined): string[] {
