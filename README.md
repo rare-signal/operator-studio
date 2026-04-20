@@ -4,7 +4,7 @@ A self-hostable workspace for reviewing, summarizing, and continuing agent codin
 
 Built as the chat-to-org-memory layer your team already needed: one place every AI conversation can be reviewed, promoted, shared, and replayed.
 
-<!-- Screenshot here -->
+![Operator Studio dashboard — workspace switcher on the left, stat cards showing total threads / promoted / in review / imported, a Featured/Promoted row with three curated threads, an In Review row, and a thread list below.](./docs/screenshot-dashboard.png)
 
 ## Features
 
@@ -39,7 +39,11 @@ Built as the chat-to-org-memory layer your team already needed: one place every 
 
 ```bash
 cp .env.example .env.local
-# edit DATABASE_URL
+# edit DATABASE_URL — point at a local Postgres you can write to.
+# If the database doesn't exist yet, create it first:
+createdb operator_studio        # or: psql -c "CREATE DATABASE operator_studio"
+
+nvm use                         # uses .nvmrc (Node 20)
 pnpm install
 pnpm db:migrate
 pnpm dev

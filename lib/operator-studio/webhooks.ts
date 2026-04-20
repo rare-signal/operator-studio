@@ -41,12 +41,23 @@ export function emitWebhookEvent(
   event: WebhookEvent,
   payload: Omit<WebhookPayload, "event" | "workspaceId" | "timestamp">
 ): void {
+  // If an absolute public base URL is configured, build a click-through
+  // link for thread-scoped events so receivers (Slack / Discord / etc) can
+  // deep-link back into Operator Studio without hardcoding the host.
+  const publicBase = process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "")
+  const threadId = typeof payload.threadId === "string" ? payload.threadId : null
+  const publicUrl =
+    publicBase && threadId
+      ? `${publicBase}/operator-studio/threads/${threadId}`
+      : undefined
+
   // Fire and forget — we don't await here. Errors are logged on the row.
   void deliver(workspaceId, event, {
     ...payload,
     event,
     workspaceId,
     timestamp: new Date().toISOString(),
+    ...(publicUrl ? { publicUrl } : {}),
   })
 }
 

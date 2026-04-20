@@ -436,9 +436,21 @@ function parseMarkdownHeadings(text: string): ParsedConversation {
 }
 
 function inferRoleFromHeading(heading: string): NormalizedRole {
-  // Alternate user/assistant if we can't tell. First turn is usually the prompt.
-  if (/prompt|question|ask/i.test(heading)) return "user"
-  if (/response|answer|reply|completion/i.test(heading)) return "assistant"
+  // Try the bare-label patterns first (markdown headings like `# User` or
+  // `# Assistant` won't hit detectLabel's regex because they have no trailing
+  // colon/dash/etc — so we need to recognize them here too).
+  const normalized = heading.trim().toLowerCase()
+  if (/\b(user|you|human|me|operator|prompt|question|ask)\b/.test(normalized)) {
+    return "user"
+  }
+  if (
+    /\b(assistant|ai|bot|model|gpt|chatgpt|claude|gemini|copilot|cursor|codex|response|answer|reply|completion)\b/.test(
+      normalized
+    )
+  ) {
+    return "assistant"
+  }
+  if (/\b(system|developer)\b/.test(normalized)) return "system"
   return "user"
 }
 

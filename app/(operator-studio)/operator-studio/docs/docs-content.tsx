@@ -783,11 +783,6 @@ const SECTIONS: Section[] = [
             <code>pnpm db:migrate</code> — apply pending migrations
           </li>
           <li>
-            <code>pnpm db:push</code> — push the schema directly (dev
-            convenience; prefer <code>migrate</code> for anything that has
-            data)
-          </li>
-          <li>
             <code>pnpm db:seed</code> — ensure the <code>global</code>{" "}
             workspace exists; nothing else
           </li>
@@ -843,7 +838,7 @@ export function DocsContent() {
           A short tour of what's in Operator Studio and how to drive it. For
           the full README and production notes, see the{" "}
           <a
-            href="https://github.com/"
+            href="https://github.com/rare-signal/operator-studio"
             target="_blank"
             rel="noreferrer"
             className="underline"
