@@ -103,6 +103,6 @@ Configure via `WORKBOOK_CLUSTER_ENDPOINTS` (comma-separated URLs) and `WORKBOOK_
 Operator Studio is source-available under the [PolyForm Small Business License 1.0.0](./LICENSE).
 
 - **Free** for personal use, hobby projects, research, nonprofits, and any small business (fewer than 100 total employees + contractors AND less than US$1M annual revenue in the prior tax year).
-- **Commercial license required** for larger organizations. Email `commercial@<your-domain>` — typical pricing is flat-rate annual per workspace; contact us for a quote.
+- **Commercial license required** for larger organizations. Email [me@davidlinclark.com](mailto:me@davidlinclark.com) — typical pricing is flat-rate annual per workspace; contact for a quote.
 
 This license is not OSI-approved "open source" — it is deliberately source-available with a small-business carve-out. The license text is lawyer-drafted and taken verbatim from [polyformproject.org](https://polyformproject.org/licenses/small-business/1.0.0). If you're over the threshold and want to use Operator Studio, talk to us — we want to make it easy.
