@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
-import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
+import {
+  authorizeRequest,
+  getDisplayName,
+  isAdmin,
+} from "@/lib/operator-studio/auth"
 import {
   createApiToken,
   listApiTokens,
@@ -20,6 +24,9 @@ export async function GET(req: Request) {
   if (!auth.ok) {
     return NextResponse.json({ error: auth.reason }, { status: 401 })
   }
+  if (!(await isAdmin(auth))) {
+    return NextResponse.json({ error: "Admin access required" }, { status: 403 })
+  }
   const url = new URL(req.url)
   const scope = url.searchParams.get("workspaceId")
   const rows = await listApiTokens(
@@ -32,6 +39,9 @@ export async function POST(request: Request) {
   const auth = await authorizeRequest(request)
   if (!auth.ok) {
     return NextResponse.json({ error: auth.reason }, { status: 401 })
+  }
+  if (!(await isAdmin(auth))) {
+    return NextResponse.json({ error: "Admin access required" }, { status: 403 })
   }
 
   const raw = await request.json().catch(() => null)

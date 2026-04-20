@@ -16,11 +16,15 @@ import { apiTokens } from "@/lib/server/db/schema"
  *   facing API route? Returns a discriminated result carrying the
  *   resolved identity so the route can attribute imports / promotions /
  *   chats to the right person regardless of what the client claims.
+ * - `isAdmin(auth)` — is the resolved identity allowed to hit the admin
+ *   surface (token + webhook management)? The bundled implementation
+ *   trusts every authenticated caller — swap this for a real RBAC check
+ *   when deploying multi-user. See the README "Auth" section.
  * - `getDisplayName()` — cookie-stored self-attested name, for UI
  *   attribution when no bearer token is present.
  *
  * When you swap in a real auth provider, replace the bodies of these
- * three. The rest of the app only talks to them.
+ * four. The rest of the app only talks to them.
  */
 
 // ─── Cookie-based UI auth (unchanged) ───────────────────────────────────────
@@ -151,6 +155,34 @@ export async function authorizeRequest(req: Request): Promise<AuthResult> {
 export async function isApiAuthorized(req: Request): Promise<boolean> {
   const r = await authorizeRequest(req)
   return r.ok
+}
+
+/**
+ * Is this caller allowed to hit the admin surface (mint/revoke API tokens,
+ * manage webhook subscriptions)?
+ *
+ * The bundled implementation trusts every authenticated caller — intentional
+ * for a self-hosted small-team posture. For multi-user deployments, swap
+ * this to check a real role claim. Two common shapes:
+ *
+ *   // Hardcoded display-name allowlist (quick and dirty)
+ *   const admins = (process.env.OPERATOR_STUDIO_ADMINS ?? "")
+ *     .split(",").map(s => s.trim()).filter(Boolean)
+ *   return auth.identity != null && admins.includes(auth.identity)
+ *
+ *   // SSO-backed (swap after wiring your provider in authorizeRequest)
+ *   return auth.ok && auth.role === "admin"
+ */
+export async function isAdmin(auth: AuthResult): Promise<boolean> {
+  if (!auth.ok) return false
+
+  // Optional env allowlist of display names. Unset = everyone passes.
+  const raw = process.env.OPERATOR_STUDIO_ADMINS?.trim()
+  if (!raw) return true
+
+  const admins = raw.split(",").map((s) => s.trim()).filter(Boolean)
+  if (admins.length === 0) return true
+  return auth.identity != null && admins.includes(auth.identity)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

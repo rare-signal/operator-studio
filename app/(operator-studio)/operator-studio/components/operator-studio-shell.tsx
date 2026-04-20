@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { useRouter, usePathname } from "next/navigation"
+import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import {
   Brain,
   ChevronRight,
@@ -250,6 +250,10 @@ function OperatorStudioSidebar({
 }) {
   const router = useRouter()
   const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const activeStateFilter = searchParams?.get("state")
+  const activeView = searchParams?.get("view")
+  const activeSourceFilter = searchParams?.get("source")
 
   const [promotedMsgCount, setPromotedMsgCount] = React.useState(0)
 
@@ -356,8 +360,10 @@ function OperatorStudioSidebar({
                     <SidebarMenuSubItem key={state}>
                       <SidebarMenuSubButton
                         isActive={
-                          pathname === `/operator-studio` &&
-                          false /* TODO: URL state filter */
+                          pathname === "/operator-studio" &&
+                          (state === "promoted"
+                            ? activeView === "promoted"
+                            : activeStateFilter === state)
                         }
                         onClick={() =>
                           router.push(
@@ -404,6 +410,10 @@ function OperatorStudioSidebar({
                     .map(([source, count]) => (
                       <SidebarMenuSubItem key={source}>
                         <SidebarMenuSubButton
+                          isActive={
+                            pathname === "/operator-studio" &&
+                            activeSourceFilter === source
+                          }
                           onClick={() =>
                             router.push(
                               `/operator-studio?source=${source}`

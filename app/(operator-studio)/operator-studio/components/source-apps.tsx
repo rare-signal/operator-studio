@@ -39,25 +39,25 @@ const SOURCE_APP_DISPLAY: Record<OperatorSourceApp, SourceAppDisplay> = {
   codex: {
     label: SOURCE_APP_LABELS.codex,
     shortLabel: "Codex",
-    iconSrc: "/operator-studio/source-apps/source-app-codex.png",
+    iconSrc: null,
     chipClassName: warmOrange,
   },
   cursor: {
     label: SOURCE_APP_LABELS.cursor,
     shortLabel: "Cursor",
-    iconSrc: "/operator-studio/source-apps/source-app-cursor.png",
+    iconSrc: null,
     chipClassName: coolSky,
   },
   claude: {
     label: SOURCE_APP_LABELS.claude,
     shortLabel: "Claude",
-    iconSrc: "/operator-studio/source-apps/source-app-claude.png",
+    iconSrc: null,
     chipClassName: warmAmber,
   },
   "claude-code": {
     label: SOURCE_APP_LABELS["claude-code"],
     shortLabel: "C-Code",
-    iconSrc: "/operator-studio/source-apps/source-app-claude.png",
+    iconSrc: null,
     chipClassName: warmAmber,
   },
   chatgpt: {
@@ -87,13 +87,13 @@ const SOURCE_APP_DISPLAY: Record<OperatorSourceApp, SourceAppDisplay> = {
   antigravity: {
     label: SOURCE_APP_LABELS.antigravity,
     shortLabel: "Anti-G",
-    iconSrc: "/operator-studio/source-apps/source-app-antigravity.png",
+    iconSrc: null,
     chipClassName: coolTeal,
   },
   void: {
     label: SOURCE_APP_LABELS.void,
     shortLabel: "Void",
-    iconSrc: "/operator-studio/source-apps/source-app-void.png",
+    iconSrc: null,
     chipClassName: coolCyan,
   },
   aider: {

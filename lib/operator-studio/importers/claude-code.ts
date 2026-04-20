@@ -56,7 +56,7 @@ const CLAUDE_SESSION_ROOTS = [
 ]
 
 function getSessionRoots(): string[] {
-  const envRoots = process.env.OBS_CLAUDE_CHAT_ROOTS
+  const envRoots = process.env.OPERATOR_STUDIO_CLAUDE_ROOTS
   if (envRoots) {
     return envRoots.split(":").filter(Boolean)
   }

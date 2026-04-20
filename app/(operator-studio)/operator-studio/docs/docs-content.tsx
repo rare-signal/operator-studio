@@ -4,6 +4,7 @@ import * as React from "react"
 import Link from "next/link"
 import {
   Book,
+  Copy,
   Globe,
   Keyboard,
   KeyRound,
@@ -11,7 +12,10 @@ import {
   MessageSquare,
   Package,
   Rocket,
+  Search,
+  Settings,
   Terminal,
+  Zap,
 } from "lucide-react"
 
 import { Separator } from "@/registry/new-york-v4/ui/separator"
@@ -93,6 +97,65 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "cross-workspace",
+    title: "Cross-workspace Promote and Pull",
+    icon: <Copy className="h-4 w-4" />,
+    body: (
+      <>
+        <p>
+          Workspaces are isolated — but the <code>global</code> library is
+          shared. Two actions on a thread detail page's <strong>Copy…</strong>{" "}
+          dropdown let you move content across that boundary without losing
+          the original.
+        </p>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            <strong>Promote to Global</strong> — visible when the thread
+            lives in a sub-workspace and you are viewing it there. Creates a
+            copy in <code>global</code> with <code>promoted_from_id</code>{" "}
+            pointing at the original.
+          </li>
+          <li>
+            <strong>Pull into <em>&lt;workspace&gt;</em></strong> — visible
+            when viewing a global thread from a sub-workspace. Creates a copy
+            in that sub-workspace with <code>pulled_from_id</code> pointing at
+            the global original.
+          </li>
+        </ul>
+        <p>
+          Both actions are additive — the source thread is never modified.
+          Copies include all messages and summaries; continuation chat
+          sessions are not copied because they are operator-scoped.
+        </p>
+        <p>
+          Provenance chips render in the thread detail header for copied
+          threads and link back to the source. The page loader falls back to{" "}
+          <code>global</code> for missing threads, so you can navigate to a
+          global thread from a sub-workspace in order to pull it.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          API
+        </h3>
+        <p>
+          <code>POST /api/operator-studio/threads/[id]/copy</code> with body{" "}
+          <code>{'{action: "promote"}'}</code> or{" "}
+          <code>{'{action: "pull", targetWorkspaceId}'}</code>.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Workflow
+        </h3>
+        <p>
+          Treat your personal workspace as scratch. Promote to{" "}
+          <code>global</code> once a thread is team-valuable, and pull global
+          threads into a sub-workspace when you want to annotate or continue
+          them inside a smaller scope.
+        </p>
+      </>
+    ),
+  },
+  {
     id: "importing",
     title: "Importing threads",
     icon: <Package className="h-4 w-4" />,
@@ -131,6 +194,66 @@ const SECTIONS: Section[] = [
           auto-generate a short title from the opening turns. Without an
           endpoint it falls back to truncating the first user message.
         </p>
+      </>
+    ),
+  },
+  {
+    id: "search",
+    title: "Search",
+    icon: <Search className="h-4 w-4" />,
+    body: (
+      <>
+        <p>
+          The sidebar has a search input at the top. Type at least two
+          characters and hit <kbd className="rounded border px-1 text-xs">Enter</kbd>,
+          or wait for the 400ms debounce — either way you land at{" "}
+          <code>/operator-studio/search?q=…</code>.
+        </p>
+        <p>
+          The results page renders two ranked sections:{" "}
+          <strong>Threads</strong> (title, summary, why-it-matters, and
+          project slug all searched together) and{" "}
+          <strong>Messages in threads</strong> (raw message content).
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          How ranking works
+        </h3>
+        <p>
+          Search is backed by a Postgres <code>tsvector</code> with weighted
+          fields — title at weight <code>A</code>, summary at <code>B</code>,
+          why-it-matters at <code>C</code>, project slug at <code>D</code>.
+          Results are ordered by <code>ts_rank_cd</code>, and snippets come
+          from <code>ts_headline</code> with matches wrapped in{" "}
+          <code>&lt;mark&gt;</code> for highlighting.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Scope
+        </h3>
+        <p>
+          Search is workspace-scoped — you only see hits inside your active
+          workspace. Switch workspaces to search elsewhere. The minimum query
+          length is two characters.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          API
+        </h3>
+        <p>
+          <code>
+            GET /api/operator-studio/search?q=&lt;term&gt;&amp;scope=threads|messages|all&amp;limit=30
+          </code>
+          . Bearer-token auth. Returns{" "}
+          <code>{"{query, threads: [...], messages: [...]}"}</code>.
+        </p>
+        <pre className="mt-2 overflow-x-auto rounded-md border bg-muted/40 p-3 text-xs">
+          {`curl -sG "$OPERATOR_STUDIO_URL/api/operator-studio/search" \\
+     -H "Authorization: Bearer $TOKEN" \\
+     --data-urlencode "q=sidebar layout" \\
+     --data-urlencode "scope=all" \\
+     --data-urlencode "limit=30"`}
+        </pre>
       </>
     ),
   },
@@ -444,6 +567,72 @@ const SECTIONS: Section[] = [
     ),
   },
   {
+    id: "streaming",
+    title: "Continuation chat: streaming",
+    icon: <Zap className="h-4 w-4" />,
+    body: (
+      <>
+        <p>
+          By default the chat endpoint streams. The UI shows tokens as they
+          arrive with a pulsing cursor, so long replies feel responsive
+          instead of hanging on a spinner.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          SSE frames
+        </h3>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            <code>event: start</code> — carries the session id and the
+            context snapshot used for grounding.
+          </li>
+          <li>
+            <code>event: delta</code> — content chunks as the model produces
+            them.
+          </li>
+          <li>
+            <code>event: done</code> — the saved assistant message, including
+            its real DB id.
+          </li>
+        </ul>
+        <p>
+          The final message is persisted <strong>before</strong>{" "}
+          <code>done</code> fires, so the id the client receives is real and
+          message-level promotion, edit, and delete keep working mid-session.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Opting out
+        </h3>
+        <p>
+          The JSON path is preserved. POST without <code>?stream=1</code> and
+          without <code>Accept: text/event-stream</code> and the endpoint
+          returns <code>{"{sessionId, message}"}</code> as before.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Echo mode
+        </h3>
+        <p>
+          If <code>WORKBOOK_CLUSTER_ENDPOINTS</code> is unset, chat still
+          works — the server emits <code>start</code> →{" "}
+          <code>done</code> with a helpful fallback message, which is enough
+          to drive the UI while you wire up a model backend.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          CLI
+        </h3>
+        <pre className="mt-2 overflow-x-auto rounded-md border bg-muted/40 p-3 text-xs">
+          {`curl -N -X POST "$OPERATOR_STUDIO_URL/api/operator-studio/chat?stream=1" \\
+     -H "Authorization: Bearer $TOKEN" \\
+     -H "Content-Type: application/json" \\
+     -d '{"threadId":"thread-...","message":"continue"}'`}
+        </pre>
+      </>
+    ),
+  },
+  {
     id: "auth",
     title: "Auth",
     icon: <KeyRound className="h-4 w-4" />,
@@ -468,6 +657,105 @@ const SECTIONS: Section[] = [
           <code>isAuthenticated()</code> / <code>getDisplayName()</code>) are
           the seams. Auth.js, Clerk, WorkOS, or a reverse-proxy header all
           plug in cleanly.
+        </p>
+      </>
+    ),
+  },
+  {
+    id: "admin",
+    title: "Admin: tokens and webhooks",
+    icon: <Settings className="h-4 w-4" />,
+    body: (
+      <>
+        <p>
+          <Link
+            href="/operator-studio/admin"
+            className="underline"
+          >
+            /operator-studio/admin
+          </Link>{" "}
+          has two panels: <strong>API Tokens</strong> and{" "}
+          <strong>Webhooks</strong>. This is where you mint bearer tokens for
+          scripts and IDE hooks, and where you wire the workspace up to
+          Slack, Discord, or any receiver that wants to react to promotion
+          events.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Tokens
+        </h3>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            Per-user bearer tokens, stored as SHA-256 hashes. The plaintext
+            is shown <strong>once</strong> at creation — the reveal card
+            renders immediately after you submit the create form, and then
+            it's gone; copy it out then.
+          </li>
+          <li>
+            Each token carries a <code>display_name</code>. When a token is
+            used, every attribution field (<code>imported_by</code>,{" "}
+            <code>promoted_by</code>, etc.) resolves to that name regardless
+            of what the caller claims in query params. Bots cannot spoof
+            humans.
+          </li>
+          <li>
+            Tokens can be <strong>workspace-scoped</strong> (pinned to one
+            workspace) or <strong>global</strong> (usable in any workspace
+            via cookie or <code>workspaceId</code> param).
+          </li>
+          <li>
+            Revocation is soft — setting <code>revoked_at</code> makes the
+            token return <code>401</code> immediately on next use.
+          </li>
+        </ul>
+        <p>
+          API: <code>GET /api/operator-studio/tokens</code>,{" "}
+          <code>POST</code> with body{" "}
+          <code>{"{label, displayName, workspaceId?}"}</code>, and{" "}
+          <code>DELETE /api/operator-studio/tokens/[id]</code>.
+        </p>
+        <p>
+          Legacy fallback: <code>OPERATOR_STUDIO_INGEST_TOKEN</code> remains
+          as a single shared secret for bootstrap scripts. When both are
+          configured, DB-backed tokens win.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Webhooks
+        </h3>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            Per-workspace subscriptions. Events:{" "}
+            <code>thread.imported</code>, <code>thread.promoted</code>,{" "}
+            <code>thread.archived</code>, <code>message.promoted</code>.
+          </li>
+          <li>
+            Configure a URL, an optional secret (used for HMAC-SHA256
+            signing), and an optional comma-separated events filter.
+          </li>
+          <li>
+            Delivery is fire-and-forget with a 10s timeout. Each delivery
+            sends <code>X-OperatorStudio-Event</code>,{" "}
+            <code>X-OperatorStudio-Delivery</code> (UUID for dedupe),{" "}
+            <code>X-OperatorStudio-Timestamp</code>, and — when a secret is
+            set — <code>X-OperatorStudio-Signature</code>.
+          </li>
+          <li>
+            Pause and resume via <code>PATCH</code>; remove via{" "}
+            <code>DELETE</code>.
+          </li>
+          <li>
+            Zero-DB global hatch:{" "}
+            <code>OPERATOR_STUDIO_PROMOTION_WEBHOOK_URL</code> plus{" "}
+            <code>OPERATOR_STUDIO_PROMOTION_WEBHOOK_SECRET</code> fire on
+            every event across every workspace, regardless of what's
+            configured in the admin UI.
+          </li>
+        </ul>
+        <p>
+          Receiver templates with full HMAC verification live in{" "}
+          <code>examples/webhooks/</code> — Slack and Discord are both
+          included as starting points.
         </p>
       </>
     ),

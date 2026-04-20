@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 
-import { authorizeRequest } from "@/lib/operator-studio/auth"
+import { authorizeRequest, isAdmin } from "@/lib/operator-studio/auth"
 import { revokeApiToken } from "@/lib/operator-studio/tokens"
 
 export const dynamic = "force-dynamic"
@@ -12,6 +12,9 @@ export async function DELETE(
   const auth = await authorizeRequest(request)
   if (!auth.ok) {
     return NextResponse.json({ error: auth.reason }, { status: 401 })
+  }
+  if (!(await isAdmin(auth))) {
+    return NextResponse.json({ error: "Admin access required" }, { status: 403 })
   }
   const { id } = await params
   const ok = await revokeApiToken(id)

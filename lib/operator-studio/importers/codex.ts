@@ -45,7 +45,7 @@ const LEGACY_SESSION_FILES = new Set([
 ])
 
 function getSessionRoots(): string[] {
-  const envRoots = process.env.OBS_CODEX_CHAT_ROOTS
+  const envRoots = process.env.OPERATOR_STUDIO_CODEX_ROOTS
   if (envRoots) {
     return envRoots.split(":").filter(Boolean)
   }

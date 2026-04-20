@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
-import { authorizeRequest } from "@/lib/operator-studio/auth"
+import { authorizeRequest, isAdmin } from "@/lib/operator-studio/auth"
 import {
   deleteWebhookSub,
   toggleWebhookSub,
@@ -20,6 +20,9 @@ export async function PATCH(
   const auth = await authorizeRequest(request)
   if (!auth.ok) {
     return NextResponse.json({ error: auth.reason }, { status: 401 })
+  }
+  if (!(await isAdmin(auth))) {
+    return NextResponse.json({ error: "Admin access required" }, { status: 403 })
   }
   const { id } = await params
   const raw = await request.json().catch(() => null)
@@ -42,6 +45,9 @@ export async function DELETE(
   const auth = await authorizeRequest(request)
   if (!auth.ok) {
     return NextResponse.json({ error: auth.reason }, { status: 401 })
+  }
+  if (!(await isAdmin(auth))) {
+    return NextResponse.json({ error: "Admin access required" }, { status: 403 })
   }
   const { id } = await params
   const ok = await deleteWebhookSub(id)
