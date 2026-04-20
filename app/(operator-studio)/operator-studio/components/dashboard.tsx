@@ -694,50 +694,47 @@ function ImportDialog() {
     setImporting(true)
     setResult(null)
     try {
-      let messages: Array<{ role: string; content: string }> = []
+      // Let the server do the parsing — the /ingest endpoint accepts JSON,
+      // plain transcripts (User:/Assistant: labels), markdown with headings,
+      // or any provider's structured response (Gemini, OpenAI, Claude,
+      // ChatGPT share exports). See the "Ingesting from anywhere" docs
+      // section for the full format list.
+      const params = new URLSearchParams()
+      if (pasteTitle.trim()) params.set("title", pasteTitle.trim())
+      params.set("source", source || "manual")
+      const reviewer = localStorage.getItem("operator_studio_reviewer")
+      if (reviewer) params.set("importedBy", reviewer)
 
-      try {
-        const parsed = JSON.parse(pasteContent)
-        if (Array.isArray(parsed)) {
-          messages = parsed
-        } else if (parsed.messages && Array.isArray(parsed.messages)) {
-          messages = parsed.messages
-        }
-      } catch {
-        const lines = pasteContent.split("\n").filter((l) => l.trim())
-        messages = lines.map((line, i) => ({
-          role: i % 2 === 0 ? "user" : "assistant",
-          content: line,
-        }))
-      }
+      const looksJson =
+        pasteContent.trim().startsWith("{") ||
+        pasteContent.trim().startsWith("[")
 
-      const res = await fetch("/api/operator-studio/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: source || "manual",
-          importedBy:
-            localStorage.getItem("operator_studio_reviewer") ?? "operator",
-          payload: {
-            title: pasteTitle || undefined,
-            messages,
+      const res = await fetch(
+        `/api/operator-studio/ingest?${params.toString()}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": looksJson ? "application/json" : "text/plain",
           },
-        }),
-      })
-      const data = await res.json()
-      setResult(
-        data.threadCount > 0
-          ? "Thread imported as private. Review and promote from the dashboard."
-          : `Import failed: ${data.errors?.join("; ") ?? "unknown error"}`
+          body: pasteContent,
+        }
       )
-      if (data.threadCount > 0) {
+      const data = await res.json()
+      if (data.ok) {
+        setResult(
+          `Imported ${data.messageCount} turn(s) as ${data.detectedFormat}. Thread is private — promote from the dashboard.`
+        )
         setTimeout(() => {
           setOpen(false)
           router.refresh()
-        }, 1500)
+        }, 1800)
+      } else {
+        setResult(`Import failed: ${data.error}${data.detail ? ` — ${data.detail}` : ""}`)
       }
-    } catch {
-      setResult("Import failed.")
+    } catch (err) {
+      setResult(
+        `Import failed: ${err instanceof Error ? err.message : "unknown error"}`
+      )
     } finally {
       setImporting(false)
     }
@@ -926,16 +923,18 @@ function ImportDialog() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>
-                  Conversation (JSON array or plain text)
-                </Label>
+                <Label>Conversation</Label>
                 <Textarea
                   value={pasteContent}
                   onChange={(e) => setPasteContent(e.target.value)}
-                  placeholder={`[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]`}
-                  rows={8}
+                  placeholder={`Paste anything — Gemini, ChatGPT, Claude, OpenAI responses, or a transcript like:\n\nUser: how do I...\nAssistant: you can...\n\nStructured JSON, JSONL, and markdown with headings also work.`}
+                  rows={10}
                   className="font-mono text-xs"
                 />
+                <p className="text-xs text-muted-foreground">
+                  The importer autodetects format. Nothing matches? The whole
+                  blob is ingested as one message so you never lose the paste.
+                </p>
               </div>
             </>
           )}
