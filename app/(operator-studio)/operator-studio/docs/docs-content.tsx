@@ -4,6 +4,7 @@ import * as React from "react"
 import Link from "next/link"
 import {
   Book,
+  Globe,
   Keyboard,
   KeyRound,
   Layers,
@@ -46,8 +47,9 @@ const SECTIONS: Section[] = [
             <code>~/.codex/sessions</code>).
           </li>
           <li>
-            Paste a JSON payload directly via the manual importer if your
-            source is neither of those.
+            Paste anything (Gemini, ChatGPT, a plain transcript — see below)
+            into the Import dialog, or POST to the ingest endpoint from a
+            shell / IDE hook.
           </li>
         </ol>
       </>
@@ -89,24 +91,32 @@ const SECTIONS: Section[] = [
     icon: <Package className="h-4 w-4" />,
     body: (
       <>
-        <p>Three paths into the workspace:</p>
+        <p>Four paths into the workspace, pick whichever suits the source:</p>
         <ul className="ml-5 list-disc space-y-1">
           <li>
             <strong>Discovery</strong> — scans a known local path (Claude
-            Code or Codex), shows you the candidate list, and lets you
-            pick which sessions to import. Good when you have dozens of
-            sessions and only want a few.
+            Code or Codex), shows you the candidate list, and lets you pick
+            which sessions to import. Good when you have dozens of sessions
+            on disk and only want a few.
           </li>
           <li>
             <strong>Bulk from source</strong> — imports every discoverable
             session in one shot. Good when you're migrating a whole project.
           </li>
           <li>
-            <strong>Manual payload</strong> — paste JSON (either a top-level
-            array of <code>{"{role, content, timestamp}"}</code> messages, or
-            a plain-text conversation that gets interpreted as alternating
-            user/assistant turns). Good for one-offs or sources we don't yet
-            parse natively.
+            <strong>Manual paste</strong> — use the <em>Paste</em> mode in
+            the Import dialog and drop in anything. Gemini JSON, ChatGPT
+            share exports, Claude conversations, OpenAI responses, plain{" "}
+            <code>User:</code> / <code>Assistant:</code> transcripts,
+            markdown with headings, JSONL — the server-side parser
+            autodetects the format. If nothing matches, the blob still goes
+            in as a single message so you never lose the paste.
+          </li>
+          <li>
+            <strong>HTTP ingest</strong> — <code>POST</code> to{" "}
+            <code>/api/operator-studio/ingest</code> from any script, IDE
+            hook, or webhook. See the <em>Ingesting from anywhere</em>{" "}
+            section below.
           </li>
         </ul>
         <p>
@@ -114,6 +124,213 @@ const SECTIONS: Section[] = [
           auto-generate a short title from the opening turns. Without an
           endpoint it falls back to truncating the first user message.
         </p>
+      </>
+    ),
+  },
+  {
+    id: "ingesting-anywhere",
+    title: "Ingesting from anywhere",
+    icon: <Globe className="h-4 w-4" />,
+    body: (
+      <>
+        <p>
+          Operator Studio is meant to sit alongside your IDE, shell, and
+          chat apps as a persistent outboard memory. Every operator has a
+          slightly different workflow — one person pipes Gemini CLI output,
+          another pastes ChatGPT, a third triggers a GitHub Action after
+          every PR review. The ingest endpoint accepts <strong>any</strong>{" "}
+          of those shapes.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Endpoint
+        </h3>
+        <p>
+          <code>POST /api/operator-studio/ingest</code>
+          <br />
+          Send JSON, plain text, or markdown in the body. The server runs it
+          through a universal parser (see{" "}
+          <code>lib/operator-studio/importers/universal-parser.ts</code>) and
+          responds with:
+        </p>
+        <pre className="mt-2 overflow-x-auto rounded-md border bg-muted/40 p-3 text-xs">
+          {`{
+  "ok": true,
+  "threadId": "thread-...",
+  "workspaceId": "global",
+  "detectedFormat": "gemini-generate",
+  "messageCount": 3,
+  "title": "fix sidebar layout bug",
+  "viewUrl": "/operator-studio/threads/thread-..."
+}`}
+        </pre>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Formats the parser recognizes
+        </h3>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            <strong>Gemini</strong> — both{" "}
+            <code>{"{candidates: [...]}"}</code> (generateContent responses)
+            and <code>{"{contents: [{role, parts}]}"}</code> (conversational
+            history).
+          </li>
+          <li>
+            <strong>OpenAI chat-completions</strong> — responses with{" "}
+            <code>choices[].message</code> and/or prompt{" "}
+            <code>messages</code>.
+          </li>
+          <li>
+            <strong>Anthropic messages</strong> — array of{" "}
+            <code>{"{role, content}"}</code> where content can be a string
+            or a list of content-blocks with <code>{"{type, text}"}</code>.
+          </li>
+          <li>
+            <strong>ChatGPT share exports</strong> — the{" "}
+            <code>mapping</code> tree with nested{" "}
+            <code>{"{author, content: {parts}}"}</code>.
+          </li>
+          <li>
+            <strong>Our native shape</strong> —{" "}
+            <code>{"{title?, messages: [{role, content, timestamp?}]}"}</code>
+            .
+          </li>
+          <li>
+            <strong>JSONL</strong> — one JSON message object per line.
+          </li>
+          <li>
+            <strong>Labeled transcripts</strong> — lines that start with{" "}
+            <code>User:</code> / <code>You:</code> / <code>Human:</code> /{" "}
+            <code>Assistant:</code> / <code>AI:</code> / <code>Model:</code>{" "}
+            / <code>Claude:</code> / <code>Gemini:</code> / <code>GPT:</code>
+            , etc. Lines until the next label are treated as that turn's
+            content.
+          </li>
+          <li>
+            <strong>Markdown with headings</strong> — <code>#</code>,{" "}
+            <code>##</code>, etc., are treated as turn boundaries.
+          </li>
+          <li>
+            <strong>Anything else</strong> — ingested as one user message
+            so the content is still reviewable.
+          </li>
+        </ul>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Auth
+        </h3>
+        <p>
+          For scripts and IDE hooks, set{" "}
+          <code>OPERATOR_STUDIO_INGEST_TOKEN</code> in{" "}
+          <code>.env.local</code> (<code>openssl rand -hex 32</code> is a
+          reasonable generator) and pass it as{" "}
+          <code>Authorization: Bearer &lt;token&gt;</code>. The in-app Paste
+          UI continues to use the session cookie. In fully-open local dev
+          (no password gate, no ingest token) the endpoint accepts
+          unauthenticated POSTs.
+        </p>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Recipes
+        </h3>
+        <p>
+          Shell recipes with tested one-liners live in{" "}
+          <code>examples/ingest/</code>:
+        </p>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            <code>opsctl.sh</code> — <code>source</code> it in your shell
+            rc, then <code>pbpaste | opsctl ingest --title "…"</code> or{" "}
+            <code>opsctl ingest &lt; file</code>.
+          </li>
+          <li>
+            <code>gemini.sh</code> — pipe a Gemini CLI response through{" "}
+            <code>jq</code> to attach the prompt, then POST.
+          </li>
+          <li>
+            <code>chatgpt-clipboard.sh</code> — grab{" "}
+            <code>pbpaste</code> / <code>xclip</code> and forward as-is.
+          </li>
+          <li>
+            <code>plain-transcript.sh</code> — send a labeled text file.
+          </li>
+          <li>
+            <code>webhook.sh</code> — drop-in pattern for GitHub Actions,
+            Slack slash-commands, or any webhook handler.
+          </li>
+        </ul>
+        <p>
+          Quickest smoke test from the terminal:
+        </p>
+        <pre className="mt-2 overflow-x-auto rounded-md border bg-muted/40 p-3 text-xs">
+          {`curl -X POST "http://localhost:4200/api/operator-studio/ingest?title=smoke" \\
+     -H "Content-Type: text/plain" \\
+     --data-binary $'User: hi\\n\\nAssistant: hello'`}
+        </pre>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Query params
+        </h3>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            <code>title</code> — override the derived title
+          </li>
+          <li>
+            <code>tags</code> — comma-separated list applied to the thread
+          </li>
+          <li>
+            <code>projectSlug</code> — value for the thread's{" "}
+            <code>project_slug</code> column
+          </li>
+          <li>
+            <code>source</code> — one of <code>claude</code>,{" "}
+            <code>codex</code>, <code>cursor</code>,{" "}
+            <code>antigravity</code>, <code>void</code>,{" "}
+            <code>manual</code> (defaults to <code>manual</code>)
+          </li>
+          <li>
+            <code>importedBy</code> — display name for attribution (defaults
+            to the cookie identity or <code>"api"</code>)
+          </li>
+          <li>
+            <code>workspaceId</code> — target workspace (defaults to the
+            active cookie, falling back to <code>global</code>)
+          </li>
+        </ul>
+
+        <h3 className="mt-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          IDE hook patterns
+        </h3>
+        <p>
+          The idea is that an operator's IDE (Cursor, VS Code, aider, Zed,
+          whatever) can fire an "after session" hook that dumps the current
+          chat buffer into Operator Studio without you thinking about it.
+          Some shapes that work:
+        </p>
+        <ul className="ml-5 list-disc space-y-1">
+          <li>
+            <strong>Shell alias</strong> — bind{" "}
+            <code>⌘⇧I</code> in your terminal multiplexer to run{" "}
+            <code>pbpaste | opsctl ingest</code>.
+          </li>
+          <li>
+            <strong>VS Code task</strong> — a{" "}
+            <code>tasks.json</code> entry that runs{" "}
+            <code>curl</code> against the ingest endpoint with the current
+            selection on stdin.
+          </li>
+          <li>
+            <strong>Cursor / Claude Code hook</strong> — a{" "}
+            <code>SessionEnd</code> or <code>Stop</code> hook that writes
+            the session log and POSTs it.
+          </li>
+          <li>
+            <strong>GitHub Action</strong> — see{" "}
+            <code>examples/ingest/webhook.sh</code>; wire it on{" "}
+            <code>pull_request_review</code> to capture each review as a
+            thread.
+          </li>
+        </ul>
       </>
     ),
   },
