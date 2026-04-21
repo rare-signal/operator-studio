@@ -267,6 +267,12 @@ function ThreadCard({ thread }: { thread: OperatorThread }) {
             {summary}
           </CardDescription>
         )}
+        {thread.captureReason && (
+          <p className="mt-2 flex items-start gap-1.5 text-[11px] italic text-muted-foreground">
+            <Sparkles className="mt-0.5 h-3 w-3 shrink-0" />
+            <span className="line-clamp-2">{thread.captureReason}</span>
+          </p>
+        )}
       </CardHeader>
       <CardContent className="pt-0">
         <div className="flex items-center gap-3 text-[11px] text-muted-foreground">

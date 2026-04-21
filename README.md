@@ -59,6 +59,23 @@ pnpm db:seed:demo
 
 `pnpm db:seed` by itself creates just the `global` workspace and leaves the app empty — that's the right starting point when you want to capture real conversations from turn one.
 
+### Running on Windows
+
+Everything works on Windows — the app, the importers, the ingest endpoint, the admin UI. Two setup notes:
+
+- **Create the database** with `psql` instead of `createdb`:
+  ```powershell
+  psql -U postgres -c "CREATE DATABASE operator_studio"
+  ```
+- **Discovery root paths** use `;` as the separator (matching Windows `PATH` convention):
+  ```
+  OPERATOR_STUDIO_CLAUDE_ROOTS=C:\Users\you\.claude\projects;D:\shared\claude
+  ```
+- **Shell scripts in `examples/ingest/`** (`opsctl.sh`, `gemini.sh`, etc.) are bash. Run them from **Git Bash**, **WSL**, or **Windows Terminal with a bash profile**. The raw `curl` one-liners in the docs work anywhere, including PowerShell if you swap `curl` for `curl.exe` or `Invoke-RestMethod`.
+- **`nvm use`** expects [nvm-windows](https://github.com/coreybutler/nvm-windows). If you skip it, just make sure Node ≥20 is on your PATH.
+
+Claude Code and Codex both default to `C:\Users\<you>\.claude\projects` and `C:\Users\<you>\.codex\sessions` respectively, which the Discover UI picks up automatically.
+
 ## Ingest from anywhere
 
 The `/ingest` endpoint is the point of the product. Send it anything:

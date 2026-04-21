@@ -75,6 +75,41 @@ type SeedThread = {
 
 const NAMES = ["alex", "sam", "jordan", "morgan", "casey", "riley"] as const
 
+// Hand-authored "why was this worth capturing?" rationales, keyed by the
+// thread's rawTitle. Populates capture_reason on the seeded threads so the
+// showcase always has content in that column — live ingests derive this
+// via the LLM cluster (see lib/operator-studio/importers/generate-capture-reason.ts).
+const CAPTURE_REASONS: Record<string, string> = {
+  "Next.js 15 layout not re-rendering after router.refresh()":
+    "Trace-through of why router.refresh() skips cached fetches in parent layouts — ends with the revalidatePath('…', 'layout') fix most teams miss.",
+  "Drizzle migrations against an existing Postgres schema":
+    "Decision path for introspect vs push when inheriting a live DB, plus the safe ordering for checking migrations into CI.",
+  "GitHub Action caching node_modules correctly":
+    "Shows the pnpm-store cache pattern that shaves ~90s off CI; the anti-pattern (caching node_modules) is explicitly called out.",
+  "Memory leak in a long-running Node worker":
+    "Debugging session ending in the closure-captured-context root cause; the heap-snapshot workflow is worth keeping as a reference.",
+  "SSR-safe dark mode in a Tailwind app":
+    "Reusable pattern for avoiding the initial-paint flash on SSR; the inline script approach is concretely specified.",
+  "Flaky Playwright test fails only on CI":
+    "Font-loading-timing root cause for a CI-only flake — a class of bug worth recognizing once before fighting for hours.",
+  "Cloudflare Worker proxy with edge caching":
+    "Working cache-key + origin-header pattern for a Workers proxy, including the specific mistake made on the first pass.",
+  "fetch() in Server Component returning 401":
+    "Explains why fetch-to-self fails in RSC and gives the 'share a server-side helper' fix — bites most teams once.",
+  "Porting a CRA app to Vite":
+    "Concrete migration checklist with the env-var rename trap and the SVG-import workaround that tripped up the port.",
+  "Postgres trigger to enforce soft-delete invariant":
+    "Reference SQL for an AFTER UPDATE trigger that blocks hard deletes when deleted_at is already set — drop-in pattern.",
+  "Schema-first Zod validation in Express":
+    "Middleware shape for Zod-validating body + query + params with a single helper; useful boilerplate to lift.",
+  "Migrating from pnpm 8 to pnpm 10":
+    "Lockfile-format and peer-dep-resolution changes to watch for, with the specific flags that unblocked the upgrade.",
+  "Tailwind v4 arbitrary variants not working":
+    "Docs-drift bug: the v3 arbitrary-variant syntax breaks in v4; this captures the new form before someone else wastes an hour.",
+  "Debugging hydration mismatch on a date field":
+    "Locale/timezone root cause for a hydration diff, plus the suppressHydrationWarning scope guidance — common gotcha.",
+}
+
 function pad2(n: number): string {
   return n.toString().padStart(2, "0")
 }
@@ -929,6 +964,7 @@ async function main() {
       projectSlug: spec.projectSlug,
       ownerName: spec.ownerName,
       whyItMatters: spec.whyItMatters ?? null,
+      captureReason: CAPTURE_REASONS[spec.rawTitle] ?? null,
       sourcePayloadJson: null,
       parentThreadId: null,
       promotedFromId: null,

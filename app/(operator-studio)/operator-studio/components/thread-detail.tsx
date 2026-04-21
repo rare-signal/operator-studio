@@ -860,6 +860,16 @@ export function ThreadDetail({
         </div>
       </div>
 
+      {/* AI-generated capture rationale — why this thread was worth keeping. */}
+      {thread.captureReason && (
+        <div className="border-b bg-muted/20 px-4 py-2 shrink-0">
+          <p className="flex items-start gap-2 text-xs italic text-muted-foreground">
+            <Sparkles className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>{thread.captureReason}</span>
+          </p>
+        </div>
+      )}
+
       {/* Collapsible metadata drawer */}
       {showMeta && (
         <div className="border-b bg-muted/30 px-4 py-3 shrink-0 max-h-60 overflow-y-auto">

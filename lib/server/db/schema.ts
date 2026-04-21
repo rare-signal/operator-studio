@@ -47,6 +47,10 @@ export const operatorThreads = pgTable(
     projectSlug: text("project_slug"),
     ownerName: text("owner_name"),
     whyItMatters: text("why_it_matters"),
+    // Short AI-generated rationale produced at ingest time: "what's the value
+    // in capturing this thread?" Distinct from whyItMatters (which operators
+    // fill in when promoting to express strategic significance).
+    captureReason: text("capture_reason"),
     sourcePayloadJson: jsonb("source_payload_json").$type<Record<string, unknown> | null>(),
     // Fork link: points at the thread this was forked from (same workspace).
     parentThreadId: text("parent_thread_id"),

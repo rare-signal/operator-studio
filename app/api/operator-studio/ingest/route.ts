@@ -46,6 +46,7 @@ import {
 } from "@/lib/operator-studio/importers/universal-parser"
 import { deriveTitle } from "@/lib/operator-studio/importers/generate-title"
 import { deriveTags } from "@/lib/operator-studio/importers/generate-tags"
+import { deriveCaptureReason } from "@/lib/operator-studio/importers/generate-capture-reason"
 import { emitWebhookEvent } from "@/lib/operator-studio/webhooks"
 import {
   checkRateLimit,
@@ -212,6 +213,14 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Derive a short capture rationale in parallel with the other ingest
+  // prep. This is best-effort — returns null if no LLM endpoint is
+  // configured or the call fails, in which case the column stays null
+  // and the UI hides the field.
+  const captureReasonPromise = deriveCaptureReason(
+    parsed.messages.map((m) => ({ role: m.role, content: m.content }))
+  )
+
   // Track the import run.
   await createImportRun({
     id: runId,
@@ -219,6 +228,8 @@ export async function POST(req: NextRequest) {
     sourceApp,
     importedBy,
   })
+
+  const captureReason = await captureReasonPromise
 
   try {
     await insertThread({
@@ -240,6 +251,7 @@ export async function POST(req: NextRequest) {
       projectSlug: query.projectSlug?.trim() || null,
       ownerName: importedBy,
       whyItMatters: null,
+      captureReason,
       sourcePayloadJson: {
         detectedFormat: parsed.detectedFormat,
         parserNotes: parsed.notes,

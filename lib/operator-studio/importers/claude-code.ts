@@ -58,7 +58,15 @@ const CLAUDE_SESSION_ROOTS = [
 function getSessionRoots(): string[] {
   const envRoots = process.env.OPERATOR_STUDIO_CLAUDE_ROOTS
   if (envRoots) {
-    return envRoots.split(":").filter(Boolean)
+    // Platform-aware split: `:` on unix, `;` on Windows (via path.delimiter).
+    // Falls back to whichever delimiter appears first in the value so
+    // non-standard configs don't silently break.
+    const delim = envRoots.includes(path.delimiter)
+      ? path.delimiter
+      : envRoots.includes(";")
+        ? ";"
+        : ":"
+    return envRoots.split(delim).filter(Boolean)
   }
   return CLAUDE_SESSION_ROOTS.filter((r) => {
     try {

@@ -49,6 +49,10 @@ export interface OperatorThread {
   projectSlug: string | null
   ownerName: string | null
   whyItMatters: string | null
+  // Short AI-generated rationale produced at ingest time — "what's the
+  // value in capturing this thread?" Distinct from whyItMatters (which
+  // operators fill in when promoting).
+  captureReason: string | null
   // Fork link within the same workspace.
   parentThreadId: string | null
   // Cross-workspace provenance (set by promote/pull).

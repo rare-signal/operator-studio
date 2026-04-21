@@ -47,7 +47,13 @@ const LEGACY_SESSION_FILES = new Set([
 function getSessionRoots(): string[] {
   const envRoots = process.env.OPERATOR_STUDIO_CODEX_ROOTS
   if (envRoots) {
-    return envRoots.split(":").filter(Boolean)
+    // Platform-aware split: `:` on unix, `;` on Windows (via path.delimiter).
+    const delim = envRoots.includes(path.delimiter)
+      ? path.delimiter
+      : envRoots.includes(";")
+        ? ";"
+        : ":"
+    return envRoots.split(delim).filter(Boolean)
   }
   return CODEX_SESSION_ROOTS.filter((r) => {
     try {

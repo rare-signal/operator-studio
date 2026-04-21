@@ -44,6 +44,7 @@ function toThread(row: typeof operatorThreads.$inferSelect): OperatorThread {
     projectSlug: row.projectSlug,
     ownerName: row.ownerName,
     whyItMatters: row.whyItMatters,
+    captureReason: row.captureReason,
     parentThreadId: row.parentThreadId,
     promotedFromId: row.promotedFromId,
     pulledFromId: row.pulledFromId,
@@ -393,6 +394,7 @@ export async function forkThread(
     projectSlug: parent.projectSlug,
     ownerName: forkedBy,
     whyItMatters: null,
+    captureReason: parent.captureReason,
     sourcePayloadJson: null,
     parentThreadId,
     promotedFromId: null,
@@ -864,6 +866,7 @@ export async function searchThreads(
     project_slug: string | null
     owner_name: string | null
     why_it_matters: string | null
+    capture_reason: string | null
     parent_thread_id: string | null
     promoted_from_id: string | null
     pulled_from_id: string | null
@@ -894,6 +897,7 @@ export async function searchThreads(
       t.project_slug,
       t.owner_name,
       t.why_it_matters,
+      t.capture_reason,
       t.parent_thread_id,
       t.promoted_from_id,
       t.pulled_from_id,
@@ -908,6 +912,7 @@ export async function searchThreads(
         coalesce(
           t.promoted_summary,
           t.raw_summary,
+          t.capture_reason,
           t.why_it_matters,
           t.promoted_title,
           t.raw_title,
@@ -943,6 +948,7 @@ export async function searchThreads(
     projectSlug: row.project_slug,
     ownerName: row.owner_name,
     whyItMatters: row.why_it_matters,
+    captureReason: row.capture_reason,
     parentThreadId: row.parent_thread_id,
     promotedFromId: row.promoted_from_id,
     pulledFromId: row.pulled_from_id,
