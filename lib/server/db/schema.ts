@@ -59,6 +59,10 @@ export const operatorThreads = pgTable(
     pulledFromId: text("pulled_from_id"),
     visibleInStudio: integer("visible_in_studio").notNull().default(1),
     messageCount: integer("message_count").notNull().default(0),
+    // Stamped when the thread transitions into review_state = 'promoted'.
+    // Distinct from updated_at, which moves on every edit. Null for
+    // never-promoted threads.
+    promotedAt: timestamp("promoted_at", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),

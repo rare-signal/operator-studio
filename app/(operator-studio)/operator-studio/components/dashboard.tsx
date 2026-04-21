@@ -807,7 +807,13 @@ function ImportDialog() {
               <SourceAppToken source={source} size="sm" />
             </div>
             <Select
-              value={source}
+              value={
+                mode === "discover" &&
+                source !== "claude" &&
+                source !== "codex"
+                  ? "claude"
+                  : source
+              }
               onValueChange={(v) => {
                 setSource(v)
                 resetDiscovery()
@@ -817,16 +823,29 @@ function ImportDialog() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="claude">Claude Code</SelectItem>
-                <SelectItem value="codex">Codex</SelectItem>
-                <SelectItem value="cursor">Cursor</SelectItem>
-                <SelectItem value="antigravity">Antigravity</SelectItem>
-                <SelectItem value="void">Void</SelectItem>
-                <SelectItem value="manual">Manual</SelectItem>
+                {mode === "discover" ? (
+                  <>
+                    <SelectItem value="claude">Claude Code</SelectItem>
+                    <SelectItem value="codex">Codex</SelectItem>
+                  </>
+                ) : (
+                  <>
+                    <SelectItem value="claude">Claude Code</SelectItem>
+                    <SelectItem value="codex">Codex</SelectItem>
+                    <SelectItem value="cursor">Cursor</SelectItem>
+                    <SelectItem value="chatgpt">ChatGPT</SelectItem>
+                    <SelectItem value="gemini">Gemini</SelectItem>
+                    <SelectItem value="anthropic">Anthropic</SelectItem>
+                    <SelectItem value="openai">OpenAI</SelectItem>
+                    <SelectItem value="manual">Manual</SelectItem>
+                  </>
+                )}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Discover is live for Claude Code and Codex today. The other lanes stay visible here so the import surface matches the roadmap.
+              {mode === "discover"
+                ? "Local discovery scans ~/.claude/projects (Claude Code) and ~/.codex/sessions (Codex)."
+                : "Tag the thread's source. The universal parser autodetects format regardless of this label."}
             </p>
           </div>
 

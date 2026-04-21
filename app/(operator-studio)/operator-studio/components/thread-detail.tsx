@@ -861,11 +861,24 @@ export function ThreadDetail({
       </div>
 
       {/* AI-generated capture rationale — why this thread was worth keeping. */}
-      {thread.captureReason && (
+      {thread.captureReason ? (
         <div className="border-b bg-muted/20 px-4 py-2 shrink-0">
           <p className="flex items-start gap-2 text-xs italic text-muted-foreground">
             <Sparkles className="mt-0.5 h-3 w-3 shrink-0" />
             <span>{thread.captureReason}</span>
+          </p>
+        </div>
+      ) : (
+        <div className="border-b bg-muted/10 px-4 py-2 shrink-0">
+          <p className="flex items-start gap-2 text-xs text-muted-foreground">
+            <Sparkles className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>
+              No capture rationale on file. Configure{" "}
+              <code className="rounded bg-muted px-1 text-[10px]">
+                WORKBOOK_CLUSTER_ENDPOINTS
+              </code>{" "}
+              to have future imports auto-generate one.
+            </span>
           </p>
         </div>
       )}

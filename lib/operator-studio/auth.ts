@@ -188,6 +188,25 @@ export async function isAdmin(auth: AuthResult): Promise<boolean> {
   return auth.identity != null && admins.includes(auth.identity)
 }
 
+/**
+ * Cookie-only variant of `isAdmin` for server components (page loaders),
+ * where we don't have a `Request` handy for bearer inspection. Resolves
+ * identity from the `operator_studio_reviewer` cookie and applies the
+ * same admin allowlist logic.
+ */
+export async function isAdminFromCookie(): Promise<boolean> {
+  if (!(await isAuthenticated())) return false
+
+  const raw = process.env.OPERATOR_STUDIO_ADMINS?.trim()
+  if (!raw) return true
+
+  const admins = raw.split(",").map((s) => s.trim()).filter(Boolean)
+  if (admins.length === 0) return true
+
+  const identity = await getDisplayName()
+  return identity != null && admins.includes(identity)
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 export function sha256(input: string): string {

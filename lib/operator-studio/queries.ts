@@ -278,6 +278,9 @@ export async function updateThreadReviewState(
       reviewState,
       updatedAt: now,
       ...(reviewState === "archived" ? { archivedAt: now } : {}),
+      // Stamp promoted_at on the transition to 'promoted'. If the thread is
+      // being re-promoted (rare), this overwrites — acceptable for demo.
+      ...(reviewState === "promoted" ? { promotedAt: now } : {}),
     })
     .where(
       and(
@@ -342,6 +345,7 @@ export async function promoteThreadMetadata(
       reviewState: "promoted",
       privacyState: "team",
       updatedAt: now,
+      promotedAt: now,
     })
     .where(
       and(
@@ -401,6 +405,7 @@ export async function forkThread(
     pulledFromId: null,
     visibleInStudio: 1,
     messageCount: 0,
+    promotedAt: null,
     archivedAt: null,
     createdAt: now,
     updatedAt: now,

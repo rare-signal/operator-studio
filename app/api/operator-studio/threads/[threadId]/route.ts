@@ -144,6 +144,13 @@ export async function PATCH(
       threadId,
       body.reviewState as OperatorReviewState
     )
+    if (body.reviewState === "archived") {
+      const actor = auth.identity ?? (await getDisplayName()) ?? "operator"
+      emitWebhookEvent(workspaceId, "thread.archived", {
+        threadId,
+        archivedBy: actor,
+      })
+    }
     return NextResponse.json({ ok: true })
   }
 
@@ -161,5 +168,11 @@ export async function DELETE(
   const workspaceId = await getActiveWorkspaceId()
   const { threadId } = await params
   await softDeleteThread(workspaceId, threadId)
+  const actor = auth.identity ?? (await getDisplayName()) ?? "operator"
+  emitWebhookEvent(workspaceId, "thread.archived", {
+    threadId,
+    archivedBy: actor,
+    viaDelete: true,
+  })
   return NextResponse.json({ ok: true })
 }

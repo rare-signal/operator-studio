@@ -55,13 +55,16 @@ export async function importFromSource(
   try {
     switch (sourceApp) {
       case "claude":
+      case "claude-code":
         sessions = discoverClaudeSessions()
         break
       case "codex":
         sessions = discoverCodexSessions()
         break
       default:
-        errors.push(`Source "${sourceApp}" discovery not yet implemented`)
+        errors.push(
+          `Local discovery isn't wired up for "${sourceApp}" — only claude and codex have filesystem importers. Paste / ingest endpoint accept every source.`
+        )
     }
   } catch (err) {
     errors.push(
@@ -117,13 +120,16 @@ export async function importSingleFile(
     let session: ParsedSession | null = null
     switch (sourceApp) {
       case "claude":
+      case "claude-code":
         session = parseClaudeFile(filePath)
         break
       case "codex":
         session = parseCodexFile(filePath)
         break
       default:
-        errors.push(`Source "${sourceApp}" file import not yet implemented`)
+        errors.push(
+          `File import isn't wired up for "${sourceApp}" — only claude and codex have filesystem importers. Paste / ingest endpoint accept every source.`
+        )
     }
 
     if (session) {

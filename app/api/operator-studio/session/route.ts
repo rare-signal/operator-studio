@@ -29,6 +29,18 @@ function getConfiguredPassword(): string | null {
   return value && value.length > 0 ? value : null
 }
 
+function isLlmConfigured(): boolean {
+  const raw =
+    process.env.WORKBOOK_CLUSTER_ENDPOINTS ||
+    process.env.WORKBOOK_BALANCED_ENDPOINTS ||
+    process.env.WORKBOOK_FAST_ENDPOINTS ||
+    ""
+  return raw
+    .split(/[\n,]/)
+    .map((e) => e.trim())
+    .filter(Boolean).length > 0
+}
+
 export async function POST(request: Request) {
   const raw = await request.json().catch(() => null)
   const parsed = sessionPostSchema.safeParse(raw)
@@ -92,12 +104,14 @@ export async function GET() {
   const jar = await cookies()
   const reviewer = jar.get("operator_studio_reviewer")?.value
   const configuredPassword = getConfiguredPassword()
+  const llmConfigured = isLlmConfigured()
 
   if (!configuredPassword) {
     return NextResponse.json({
       authenticated: true,
       gateEnabled: false,
       reviewer: reviewer || null,
+      llmConfigured,
     })
   }
 
@@ -106,5 +120,6 @@ export async function GET() {
     authenticated: auth === "ok",
     gateEnabled: true,
     reviewer: reviewer || null,
+    llmConfigured,
   })
 }

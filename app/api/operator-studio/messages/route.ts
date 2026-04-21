@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { z } from "zod"
 
 import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
+import { emitWebhookEvent } from "@/lib/operator-studio/webhooks"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import {
   deleteMessage,
@@ -77,9 +78,12 @@ export async function PATCH(req: NextRequest) {
   const msgSource = body.source === "chat" ? "chat" : "thread"
 
   if (body.action === "promote") {
+    // Identity precedence: bearer identity > cookie > body claim > fallback.
+    // Bots shouldn't be able to impersonate another promoter.
     const promotedBy =
-      body.promotedBy?.trim() ||
-      (await getDisplayName()) ||
+      auth.identity ??
+      (await getDisplayName()) ??
+      body.promotedBy?.trim() ??
       "operator"
     await promoteMessage(
       workspaceId,
@@ -91,6 +95,13 @@ export async function PATCH(req: NextRequest) {
       },
       msgSource
     )
+    emitWebhookEvent(workspaceId, "message.promoted", {
+      messageId: body.messageId,
+      source: msgSource,
+      promotedBy,
+      promotionKind: body.promotionKind ?? null,
+      promotionNote: body.promotionNote ?? null,
+    })
     return NextResponse.json({ ok: true })
   }
 

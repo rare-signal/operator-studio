@@ -138,9 +138,9 @@ export async function getMetricsSummary(
 /**
  * Last N days inclusive, with zero-filled gaps via a generate_series left join.
  * `imported` counts threads created on that day (imported_at::date). `promoted`
- * counts thread-level promotions on that day — we proxy this with the thread's
- * updated_at for rows whose current state is "promoted", since the schema does
- * not carry a dedicated `promoted_at` on the thread row itself.
+ * counts thread-level promotions on that day via `promoted_at` — a dedicated
+ * column stamped once at the transition into review_state = 'promoted' so the
+ * chart is stable under subsequent edits to promoted metadata.
  */
 export async function getDailyCounts(
   workspaceId: string,
@@ -169,12 +169,12 @@ export async function getDailyCounts(
       GROUP BY imported_at::date
     ),
     promotions AS (
-      SELECT updated_at::date AS day, count(*) AS c
+      SELECT promoted_at::date AS day, count(*) AS c
       FROM operator_threads
       WHERE workspace_id = ${workspaceId}
-        AND review_state = 'promoted'
-        AND updated_at >= (CURRENT_DATE - (${clampedDays - 1}::int))
-      GROUP BY updated_at::date
+        AND promoted_at IS NOT NULL
+        AND promoted_at >= (CURRENT_DATE - (${clampedDays - 1}::int))
+      GROUP BY promoted_at::date
     )
     SELECT
       to_char(s.day, 'YYYY-MM-DD') AS date,

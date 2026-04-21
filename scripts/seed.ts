@@ -971,6 +971,10 @@ async function main() {
       pulledFromId: null,
       visibleInStudio: 1,
       messageCount: spec.messages.length,
+      // Promoted seed threads get a promoted_at anchored to their updatedAt
+      // (~2h after ingest) so the metrics daily-bar view shows real activity
+      // on the seed dates. Non-promoted threads stay null.
+      promotedAt: spec.reviewState === "promoted" ? updatedAt : null,
       archivedAt: null,
       createdAt,
       updatedAt,

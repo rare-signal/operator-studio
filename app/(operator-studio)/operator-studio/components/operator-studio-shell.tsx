@@ -17,6 +17,7 @@ import {
   Star,
   Terminal,
   User,
+  Zap,
 } from "lucide-react"
 
 import {
@@ -86,6 +87,9 @@ export function OperatorStudioShell({
   const [authed, setAuthed] = React.useState<boolean | null>(null)
   const [reviewer, setReviewer] = React.useState<string | null>(null)
   const [needsIdentity, setNeedsIdentity] = React.useState(false)
+  const [llmConfigured, setLlmConfigured] = React.useState<boolean | null>(null)
+  const [dismissedEchoBanner, setDismissedEchoBanner] =
+    React.useState<boolean>(false)
   const router = useRouter()
 
   React.useEffect(() => {
@@ -93,6 +97,7 @@ export function OperatorStudioShell({
       .then((r) => r.json())
       .then((data) => {
         setAuthed(data.authenticated)
+        setLlmConfigured(!!data.llmConfigured)
         if (data.reviewer) {
           setReviewer(data.reviewer)
           localStorage.setItem("operator_studio_reviewer", data.reviewer)
@@ -110,6 +115,21 @@ export function OperatorStudioShell({
         }
       })
       .catch(() => setAuthed(false))
+
+    // Session-scoped dismissal so a power user who knows what echo mode is
+    // can hide the banner without hiding it forever.
+    setDismissedEchoBanner(
+      window.sessionStorage.getItem("operator_studio_echo_banner_dismissed") ===
+        "1"
+    )
+  }, [])
+
+  const dismissEchoBanner = React.useCallback(() => {
+    window.sessionStorage.setItem(
+      "operator_studio_echo_banner_dismissed",
+      "1"
+    )
+    setDismissedEchoBanner(true)
   }, [])
 
   const handlePasswordSuccess = React.useCallback(() => {
@@ -179,6 +199,27 @@ export function OperatorStudioShell({
             )}
           </div>
         </header>
+        {llmConfigured === false && !dismissedEchoBanner && (
+          <div className="flex shrink-0 items-center gap-3 border-b bg-amber-500/10 px-4 py-1.5 text-xs text-amber-900 dark:text-amber-100">
+            <Zap className="h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1">
+              <strong>Echo mode.</strong> No LLM endpoint configured —
+              continuation chat echoes input, capture reasons stay blank,
+              and auto-tag / auto-title fall back to heuristics. Set{" "}
+              <code className="rounded bg-amber-500/20 px-1">
+                WORKBOOK_CLUSTER_ENDPOINTS
+              </code>{" "}
+              in <code>.env.local</code> and restart to enable.
+            </span>
+            <button
+              type="button"
+              onClick={dismissEchoBanner}
+              className="rounded px-2 py-0.5 text-xs hover:bg-amber-500/20"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <main className="flex-1 min-h-0 overflow-y-auto">{children}</main>
       </SidebarInset>
     </SidebarProvider>
