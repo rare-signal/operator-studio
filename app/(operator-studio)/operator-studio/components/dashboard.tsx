@@ -824,19 +824,32 @@ function ImportDialog() {
               </SelectTrigger>
               <SelectContent>
                 {mode === "discover" ? (
+                  // Discover has a real filesystem importer — only list
+                  // sources where that importer exists.
                   <>
                     <SelectItem value="claude">Claude Code</SelectItem>
                     <SelectItem value="codex">Codex</SelectItem>
                   </>
                 ) : (
+                  // Paste mode: the universal parser autodetects format
+                  // from the body regardless of `source`. The source value
+                  // is pure metadata used for sidebar grouping, search,
+                  // and webhook routing — so list every valid tag.
                   <>
-                    <SelectItem value="claude">Claude Code</SelectItem>
+                    <SelectItem value="claude">Claude</SelectItem>
+                    <SelectItem value="claude-code">Claude Code</SelectItem>
                     <SelectItem value="codex">Codex</SelectItem>
                     <SelectItem value="cursor">Cursor</SelectItem>
                     <SelectItem value="chatgpt">ChatGPT</SelectItem>
+                    <SelectItem value="openai">OpenAI</SelectItem>
                     <SelectItem value="gemini">Gemini</SelectItem>
                     <SelectItem value="anthropic">Anthropic</SelectItem>
-                    <SelectItem value="openai">OpenAI</SelectItem>
+                    <SelectItem value="antigravity">Antigravity</SelectItem>
+                    <SelectItem value="void">Void</SelectItem>
+                    <SelectItem value="aider">aider</SelectItem>
+                    <SelectItem value="zed">Zed</SelectItem>
+                    <SelectItem value="copilot">Copilot</SelectItem>
+                    <SelectItem value="webhook">Webhook</SelectItem>
                     <SelectItem value="manual">Manual</SelectItem>
                   </>
                 )}
