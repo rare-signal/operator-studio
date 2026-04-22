@@ -383,7 +383,12 @@ export async function forkThread(
     id: forkId,
     workspaceId,
     sourceApp: parent.sourceApp,
-    sourceThreadKey: parent.sourceThreadKey,
+    // Forks are derived artifacts, not fresh captures of the same upstream
+    // session. Leaving `sourceThreadKey` null avoids a collision on the
+    // (workspace, source, sourceThreadKey) unique index AND prevents the
+    // fork from being mistakenly deduped against the parent in future
+    // sync polls.
+    sourceThreadKey: null,
     sourceLocator: parent.sourceLocator,
     importedBy: forkedBy,
     importedAt: now,
