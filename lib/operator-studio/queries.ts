@@ -367,10 +367,30 @@ export async function promoteThreadMetadata(
 
 // ─── Fork a thread for continuation ─────────────────────────────────────────
 
+/**
+ * Fork a thread into an editable derivative with its own history.
+ *
+ * The fork carries the parent's messages forward so the new thread isn't
+ * an empty shell — it's a proper diverge point the operator can continue
+ * from. The parent is linked via `parentThreadId` for provenance.
+ *
+ * When called with `sourceMessages`, those override the copied parent
+ * messages — used by the staleness-banner "fork with updates" flow to
+ * pull a fresh re-parse of the upstream file instead of the stale stored
+ * copy.
+ *
+ * `sourceThreadKey` is always null on forks (derived artifact, not a
+ * fresh capture of the upstream session).
+ */
 export async function forkThread(
   workspaceId: string,
   parentThreadId: string,
-  forkedBy: string
+  forkedBy: string,
+  sourceMessages?: Array<{
+    role: string
+    content: string
+    timestamp?: string
+  }>
 ): Promise<OperatorThread> {
   const parent = await getThreadById(workspaceId, parentThreadId)
   if (!parent) throw new Error("Parent thread not found")
@@ -378,6 +398,24 @@ export async function forkThread(
   const db = getDb()
   const now = new Date()
   const forkId = `thread-fork-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+  // Decide which messages populate the fork. Upstream re-parse (if provided)
+  // wins; otherwise copy the parent's stored messages as the diverge base.
+  let forkMessages: Array<{ role: string; content: string; createdAt: Date }>
+  if (sourceMessages && sourceMessages.length > 0) {
+    forkMessages = sourceMessages.map((m) => ({
+      role: m.role,
+      content: m.content,
+      createdAt: m.timestamp ? new Date(m.timestamp) : now,
+    }))
+  } else {
+    const parentMessages = await getThreadMessages(workspaceId, parentThreadId)
+    forkMessages = parentMessages.map((m) => ({
+      role: m.role,
+      content: m.content,
+      createdAt: new Date(m.createdAt),
+    }))
+  }
 
   const row = {
     id: forkId,
@@ -409,7 +447,7 @@ export async function forkThread(
     promotedFromId: null,
     pulledFromId: null,
     visibleInStudio: 1,
-    messageCount: 0,
+    messageCount: forkMessages.length,
     promotedAt: null,
     archivedAt: null,
     createdAt: now,
@@ -417,6 +455,25 @@ export async function forkThread(
   }
 
   await db.insert(operatorThreads).values(row)
+
+  if (forkMessages.length > 0) {
+    const rows = forkMessages.map((m, i) => ({
+      id: `msg-${forkId}-${i}`,
+      workspaceId,
+      threadId: forkId,
+      role: m.role,
+      content: m.content,
+      turnIndex: i,
+      metadataJson: null,
+      promotedAt: null,
+      promotedBy: null,
+      promotionNote: null,
+      promotionKind: null,
+      createdAt: m.createdAt,
+    }))
+    await insertThreadMessages(rows)
+  }
+
   return toThread(row)
 }
 

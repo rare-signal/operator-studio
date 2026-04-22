@@ -17,12 +17,26 @@ import {
   updateThreadReviewState,
 } from "@/lib/operator-studio/queries"
 import type { OperatorReviewState } from "@/lib/operator-studio/types"
+import {
+  parseClaudeFile,
+  type ParsedClaudeSession,
+} from "@/lib/operator-studio/importers/claude-code"
+import {
+  parseCodexFile,
+  type ParsedCodexSession,
+} from "@/lib/operator-studio/importers/codex"
+
+type ParsedSession = ParsedClaudeSession | ParsedCodexSession
 
 export const dynamic = "force-dynamic"
 
 const patchSchema = z.union([
   z.object({
     action: z.literal("fork"),
+    forkedBy: z.string().trim().min(1).max(128).optional(),
+  }),
+  z.object({
+    action: z.literal("fork-with-upstream"),
     forkedBy: z.string().trim().min(1).max(128).optional(),
   }),
   z.object({
@@ -110,6 +124,65 @@ export async function PATCH(
       "operator"
     const fork = await forkThread(workspaceId, threadId, forkedBy)
     return NextResponse.json({ ok: true, fork })
+  }
+
+  if ("action" in body && body.action === "fork-with-upstream") {
+    const forkedBy =
+      auth.identity ??
+      (await getDisplayName()) ??
+      body.forkedBy?.trim() ??
+      "operator"
+
+    // Re-parse the parent's source file to get the freshest messages.
+    // Fall back to a plain fork (copy parent's stored messages) if the
+    // file isn't reachable or the source doesn't have a filesystem
+    // importer — that way the banner's button never dead-ends.
+    const parent = await getThreadById(workspaceId, threadId)
+    if (!parent) {
+      return NextResponse.json(
+        { error: "Parent thread not found" },
+        { status: 404 }
+      )
+    }
+
+    let upstreamMessages: Array<{
+      role: string
+      content: string
+      timestamp?: string
+    }> | undefined
+
+    if (parent.sourceLocator) {
+      try {
+        let parsed: ParsedSession | null = null
+        if (parent.sourceApp === "claude" || parent.sourceApp === "claude-code") {
+          parsed = parseClaudeFile(parent.sourceLocator)
+        } else if (parent.sourceApp === "codex") {
+          parsed = parseCodexFile(parent.sourceLocator)
+        }
+        if (parsed) {
+          upstreamMessages = parsed.messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            timestamp: m.timestamp,
+          }))
+        }
+      } catch {
+        // fall through to plain fork
+      }
+    }
+
+    const fork = await forkThread(
+      workspaceId,
+      threadId,
+      forkedBy,
+      upstreamMessages
+    )
+    return NextResponse.json({
+      ok: true,
+      fork,
+      upstreamPulled: !!upstreamMessages,
+      messageCount: fork.messageCount,
+    })
   }
 
   if ("action" in body && body.action === "promote") {

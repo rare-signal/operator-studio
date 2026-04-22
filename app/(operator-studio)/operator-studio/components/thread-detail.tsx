@@ -263,6 +263,8 @@ export function ThreadDetail({
     }
   }, [thread.sourceLocator, thread.sourceApp, thread.messageCount])
 
+  // Plain fork: copies the parent's stored messages into a new thread.
+  // Used by the "Fork" button in the empty-chat placeholder.
   const handleForkThread = async () => {
     setForking(true)
     try {
@@ -271,6 +273,31 @@ export function ThreadDetail({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "fork",
+          forkedBy: reviewer ?? "operator",
+        }),
+      })
+      const data = await res.json()
+      if (data.fork?.id) {
+        router.push(`/operator-studio/threads/${data.fork.id}`)
+      }
+    } catch {
+      // handle error
+    } finally {
+      setForking(false)
+    }
+  }
+
+  // Fork-with-upstream: re-parses the source file on disk and uses those
+  // (fresher) messages in the fork. Used by the staleness banner so "Fork
+  // with updates" actually captures the new turns the banner promised.
+  const handleForkWithUpstream = async () => {
+    setForking(true)
+    try {
+      const res = await fetch(`/api/operator-studio/threads/${thread.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "fork-with-upstream",
           forkedBy: reviewer ?? "operator",
         }),
       })
@@ -946,7 +973,7 @@ export function ThreadDetail({
             size="sm"
             variant="outline"
             className="h-6 px-2 text-xs"
-            onClick={handleForkThread}
+            onClick={handleForkWithUpstream}
             disabled={forking}
           >
             {forking ? (
