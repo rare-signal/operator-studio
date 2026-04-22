@@ -10,6 +10,7 @@ import { randomUUID } from "crypto"
 import {
   completeImportRun,
   createImportRun,
+  findThreadBySourceKey,
   insertThread,
   insertThreadMessages,
 } from "../queries"
@@ -30,7 +31,10 @@ type ParsedSession = ParsedClaudeSession | ParsedCodexSession
 
 interface ImportResult {
   importRunId: string
+  /** Newly-inserted threads on this run. */
   threadCount: number
+  /** Sessions skipped because a thread with that sourceThreadKey already exists. */
+  dedupedCount: number
   errors: string[]
 }
 
@@ -73,10 +77,18 @@ export async function importFromSource(
   }
 
   let imported = 0
+  let deduped = 0
   for (const session of sessions) {
     try {
-      await ingestSession(workspaceId, session, sourceApp, importedBy, runId)
-      imported++
+      const result = await ingestSession(
+        workspaceId,
+        session,
+        sourceApp,
+        importedBy,
+        runId
+      )
+      if (result.status === "created") imported++
+      else deduped++
     } catch (err) {
       errors.push(
         `Failed to import ${session.sourceThreadId}: ${
@@ -93,7 +105,12 @@ export async function importFromSource(
     errors.length > 0 ? errors.join("; ") : undefined
   )
 
-  return { importRunId: runId, threadCount: imported, errors }
+  return {
+    importRunId: runId,
+    threadCount: imported,
+    dedupedCount: deduped,
+    errors,
+  }
 }
 
 /** Import a single file from any supported source. */
@@ -115,6 +132,7 @@ export async function importSingleFile(
 
   const errors: string[] = []
   let imported = 0
+  let deduped = 0
 
   try {
     let session: ParsedSession | null = null
@@ -133,8 +151,15 @@ export async function importSingleFile(
     }
 
     if (session) {
-      await ingestSession(workspaceId, session, sourceApp, importedBy, runId)
-      imported = 1
+      const result = await ingestSession(
+        workspaceId,
+        session,
+        sourceApp,
+        importedBy,
+        runId
+      )
+      if (result.status === "created") imported = 1
+      else deduped = 1
     } else {
       errors.push(`Could not parse file: ${filePath}`)
     }
@@ -151,7 +176,12 @@ export async function importSingleFile(
     errors.length > 0 ? errors.join("; ") : undefined
   )
 
-  return { importRunId: runId, threadCount: imported, errors }
+  return {
+    importRunId: runId,
+    threadCount: imported,
+    dedupedCount: deduped,
+    errors,
+  }
 }
 
 /** Import from a raw payload (manual paste or API import). */
@@ -230,12 +260,12 @@ export async function importFromPayload(
     await insertThreadMessages(msgs)
     await completeImportRun(workspaceId, runId, 1)
 
-    return { importRunId: runId, threadCount: 1, errors: [] }
+    return { importRunId: runId, threadCount: 1, dedupedCount: 0, errors: [] }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     errors.push(msg)
     await completeImportRun(workspaceId, runId, 0, msg)
-    return { importRunId: runId, threadCount: 0, errors }
+    return { importRunId: runId, threadCount: 0, dedupedCount: 0, errors }
   }
 }
 
@@ -257,25 +287,36 @@ export async function importSelectedFiles(
 
   const errors: string[] = []
   let imported = 0
+  let deduped = 0
 
   for (const filePath of filePaths) {
     try {
       let session: ParsedSession | null = null
       switch (sourceApp) {
         case "claude":
+        case "claude-code":
           session = parseClaudeFile(filePath)
           break
         case "codex":
           session = parseCodexFile(filePath)
           break
         default:
-          errors.push(`Source "${sourceApp}" file import not supported`)
+          errors.push(
+            `File import isn't wired up for "${sourceApp}" — only claude and codex have filesystem importers.`
+          )
           continue
       }
 
       if (session) {
-        await ingestSession(workspaceId, session, sourceApp, importedBy, runId)
-        imported++
+        const result = await ingestSession(
+          workspaceId,
+          session,
+          sourceApp,
+          importedBy,
+          runId
+        )
+        if (result.status === "created") imported++
+        else deduped++
       } else {
         errors.push(`Could not parse: ${filePath}`)
       }
@@ -293,18 +334,43 @@ export async function importSelectedFiles(
     errors.length > 0 ? errors.join("; ") : undefined
   )
 
-  return { importRunId: runId, threadCount: imported, errors }
+  return {
+    importRunId: runId,
+    threadCount: imported,
+    dedupedCount: deduped,
+    errors,
+  }
 }
 
 // ─── Internal ────────────────────────────────────────────────────────────────
 
+/**
+ * Ingest a parsed session, idempotent on `(workspaceId, sourceApp,
+ * sourceThreadId)`. Returns:
+ *   - `{status: "created", threadId}` on first ingest
+ *   - `{status: "deduped", threadId}` when the thread already exists —
+ *     we never overwrite existing content. If the upstream file has new
+ *     messages, surface that as a staleness signal on the detail page
+ *     rather than mutating in place.
+ */
 async function ingestSession(
   workspaceId: string,
   session: ParsedSession,
   sourceApp: OperatorSourceApp,
   importedBy: string,
   importRunId: string
-) {
+): Promise<{ status: "created" | "deduped"; threadId: string }> {
+  // Idempotency: if we already have a thread for this source + sourceThreadId
+  // in this workspace, return it instead of crashing on the unique index.
+  const existing = await findThreadBySourceKey(
+    workspaceId,
+    sourceApp,
+    session.sourceThreadId
+  )
+  if (existing) {
+    return { status: "deduped", threadId: existing.id }
+  }
+
   const threadId = `thread-${randomUUID()}`
   const now = new Date()
   const title = await deriveTitle(session.messages)
@@ -330,12 +396,14 @@ async function ingestSession(
     projectSlug: null,
     ownerName: importedBy,
     whyItMatters: null,
+    captureReason: null,
     sourcePayloadJson: session.metadata ?? null,
     parentThreadId: null,
     promotedFromId: null,
     pulledFromId: null,
     visibleInStudio: 1,
     messageCount: session.messages.length,
+    promotedAt: null,
     archivedAt: null,
     createdAt: now,
     updatedAt: now,
@@ -353,4 +421,5 @@ async function ingestSession(
   }))
 
   await insertThreadMessages(msgs)
+  return { status: "created", threadId }
 }

@@ -214,6 +214,55 @@ export function ThreadDetail({
   const isOriginal = !isFork
   const [forking, setForking] = React.useState(false)
 
+  // ── Upstream staleness check ─────────────────────────────────────────────
+  // If this thread was imported from a local file (sourceLocator set) we can
+  // re-parse that file on mount + on window-focus and offer the operator an
+  // explicit "fork with updates" action when the upstream has grown. We
+  // NEVER silently rewrite the rendered thread or touch promoted metadata.
+  const [upstreamDelta, setUpstreamDelta] = React.useState<number>(0)
+
+  React.useEffect(() => {
+    if (!thread.sourceLocator) return
+    let cancelled = false
+
+    async function check() {
+      if (cancelled) return
+      if (document.visibilityState !== "visible") return
+      try {
+        const res = await fetch("/api/operator-studio/discover", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source: thread.sourceApp,
+            filePath: thread.sourceLocator,
+          }),
+        })
+        if (!res.ok) return
+        const data = await res.json()
+        if (cancelled) return
+        const delta =
+          typeof data.messageCount === "number"
+            ? data.messageCount - thread.messageCount
+            : 0
+        setUpstreamDelta(delta > 0 ? delta : 0)
+      } catch {
+        // silent — staleness is a soft signal
+      }
+    }
+
+    check()
+    const onVisible = () => {
+      if (document.visibilityState === "visible") check()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    window.addEventListener("focus", check)
+    return () => {
+      cancelled = true
+      document.removeEventListener("visibilitychange", onVisible)
+      window.removeEventListener("focus", check)
+    }
+  }, [thread.sourceLocator, thread.sourceApp, thread.messageCount])
+
   const handleForkThread = async () => {
     setForking(true)
     try {
@@ -880,6 +929,32 @@ export function ThreadDetail({
               to have future imports auto-generate one.
             </span>
           </p>
+        </div>
+      )}
+
+      {/* Upstream staleness signal — soft, explicit, never auto-applies. */}
+      {upstreamDelta > 0 && (
+        <div className="flex shrink-0 items-center gap-3 border-b bg-sky-500/10 px-4 py-2 text-xs text-sky-900 dark:text-sky-100">
+          <GitFork className="h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1">
+            <strong>Upstream session grew by {upstreamDelta} message
+            {upstreamDelta === 1 ? "" : "s"}.</strong> Fork this thread to
+            capture the new turns — your existing thread stays as-is,
+            preserving any edits.
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-xs"
+            onClick={handleForkThread}
+            disabled={forking}
+          >
+            {forking ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              "Fork with updates"
+            )}
+          </Button>
         </div>
       )}
 

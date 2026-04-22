@@ -81,6 +81,67 @@ export function Dashboard({ threads, stats }: DashboardProps) {
   const sourceFilter = searchParams.get("source") as OperatorSourceApp | null
   const viewParam = searchParams.get("view")
 
+  // ── Background auto-ingest ───────────────────────────────────────────────
+  // Polls /api/operator-studio/discover (POST, mode:"sync") for each wired
+  // source while the tab is visible. Server-side checks ensure:
+  //   - first-run skip (never big-bang-import old sessions)
+  //   - idempotent ingest (never overwrite existing threads)
+  //   - brand-new sessions only (never touch in-flight edits)
+  const [autoImportToast, setAutoImportToast] = React.useState<{
+    imported: number
+    at: number
+  } | null>(null)
+
+  React.useEffect(() => {
+    let cancelled = false
+    const AUTOINGEST_SOURCES = ["claude", "codex"] as const
+
+    async function pollOnce() {
+      if (cancelled) return
+      if (document.visibilityState !== "visible") return
+      let totalImported = 0
+      for (const src of AUTOINGEST_SOURCES) {
+        try {
+          const res = await fetch("/api/operator-studio/discover", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source: src, mode: "sync" }),
+          })
+          if (!res.ok) continue
+          const data = await res.json()
+          if (data.imported > 0) totalImported += data.imported
+        } catch {
+          // Silent — auto-ingest is best-effort. User can still Discover manually.
+        }
+      }
+      if (!cancelled && totalImported > 0) {
+        setAutoImportToast({ imported: totalImported, at: Date.now() })
+        router.refresh()
+      }
+    }
+
+    // Kick immediately, then on an interval + on visibility change.
+    pollOnce()
+    const interval = window.setInterval(pollOnce, 60_000)
+    const onVisible = () => {
+      if (document.visibilityState === "visible") pollOnce()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      document.removeEventListener("visibilitychange", onVisible)
+    }
+  }, [router])
+
+  // Auto-dismiss the toast after 6 seconds.
+  React.useEffect(() => {
+    if (!autoImportToast) return
+    const t = window.setTimeout(() => setAutoImportToast(null), 6000)
+    return () => window.clearTimeout(t)
+  }, [autoImportToast])
+
   const filteredThreads = React.useMemo(() => {
     let filtered = threads
     if (stateFilter) {
@@ -122,6 +183,24 @@ export function Dashboard({ threads, stats }: DashboardProps) {
 
   return (
     <div className="flex flex-col gap-6 p-6">
+      {/* Auto-ingest toast — shows when the background poll brings in new threads. */}
+      {autoImportToast && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-900 dark:text-emerald-100">
+          <span className="flex items-center gap-2">
+            <Download className="h-3.5 w-3.5" />
+            Imported {autoImportToast.imported} new thread
+            {autoImportToast.imported === 1 ? "" : "s"} from disk.
+          </span>
+          <button
+            type="button"
+            onClick={() => setAutoImportToast(null)}
+            className="rounded px-2 py-0.5 hover:bg-emerald-500/20"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Stats row */}
       {stats && !showingFiltered && (
         <div className="grid gap-4 md:grid-cols-4">
@@ -590,6 +669,9 @@ interface DiscoveredSession {
   createdAt: string | null
   lastActivityAt: string | null
   sourceApp: string
+  alreadyImported: boolean
+  existingThreadId: string | null
+  existingMessageCount: number | null
 }
 
 function ImportDialog() {
@@ -628,9 +710,19 @@ function ImportDialog() {
       if (data.error) {
         setResult(data.error)
       } else {
-        setDiscovered(data.sessions ?? [])
-        if ((data.sessions ?? []).length === 0) {
+        const sessions = (data.sessions ?? []) as DiscoveredSession[]
+        setDiscovered(sessions)
+        // Pre-select only the not-yet-imported ones so the default action
+        // is safe even when the list includes already-captured sessions.
+        setSelected(
+          new Set(
+            sessions.filter((s) => !s.alreadyImported).map((s) => s.sourceThreadId)
+          )
+        )
+        if (sessions.length === 0) {
           setResult("No sessions found. Check that the source app has conversation files on disk.")
+        } else if (data.newCount === 0) {
+          setResult(`All ${sessions.length} discovered session(s) are already imported.`)
         }
       }
     } catch {
@@ -921,9 +1013,23 @@ function ImportDialog() {
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">
-                        {session.title}
-                      </p>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <p className={`text-sm font-medium truncate ${session.alreadyImported ? "text-muted-foreground" : ""}`}>
+                          {session.title}
+                        </p>
+                        {session.alreadyImported && (
+                          <Badge variant="secondary" className="shrink-0 text-[10px] px-1.5 py-0 h-5 font-normal">
+                            Already imported
+                          </Badge>
+                        )}
+                        {session.alreadyImported &&
+                          session.existingMessageCount != null &&
+                          session.messageCount > session.existingMessageCount && (
+                            <Badge variant="outline" className="shrink-0 text-[10px] px-1.5 py-0 h-5 font-normal">
+                              +{session.messageCount - session.existingMessageCount} new
+                            </Badge>
+                          )}
+                      </div>
                       <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-0.5">
                         <span>{session.messageCount} messages</span>
                         {session.projectHint && (
