@@ -1,0 +1,44 @@
+name: Feature request
+description: An idea for making Operator Studio more useful.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that the current app makes hard?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Your rough shape for the feature. Sketches, API shapes, and "I'd use this workflow" are all welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other shapes you thought about. Why this one wins.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Where in the app
+      multiple: true
+      options:
+        - Ingest / universal parser
+        - Dashboard / review
+        - Thread detail / promotion
+        - Continuation chat
+        - Search
+        - Workspaces (promote / pull)
+        - Webhooks
+        - Admin / tokens
+        - Auth seam
+        - Docs
+        - Examples / shell scripts
+        - Other

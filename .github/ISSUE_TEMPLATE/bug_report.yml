@@ -1,0 +1,56 @@
+name: Bug report
+description: Something that shipped isn't working as advertised.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. The more concrete the repro, the faster we can act.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug.
+      placeholder: The thing did X when I expected Y.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered list, please.
+      placeholder: |
+        1. Fresh clone
+        2. pnpm install
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node + pnpm version, OS, Postgres version, anything else relevant.
+      placeholder: |
+        Node 20.15.0
+        pnpm 9.7.1
+        macOS 15.2
+        Postgres 16
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / errors
+      description: Paste dev server output, network errors, stack traces.
+      render: shell
