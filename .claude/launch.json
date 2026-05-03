@@ -27,6 +27,12 @@
       "port": 4201
     },
     {
+      "name": "operator-studio-archive",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "/tmp/os-archive", "exec", "next", "dev", "--turbopack", "--port", "4203"],
+      "port": 4203
+    },
+    {
       "name": "operator-studio-showcase",
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["dlx", "serve", "out", "-p", "4242", "-L"],
