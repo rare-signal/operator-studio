@@ -21,6 +21,12 @@ public/showcase-data/
 **/*.showcase-disabled
 **/*.showcase-orig-backup
 
+# Per-host redaction overrides (your $USER, internal codenames, etc).
+# The default `showcase-redactions.ts` ships clean / templated; this
+# file merges in at snapshot time. Never commit machine-specific
+# scrubbing rules.
+scripts/showcase-redactions.local.ts
+
 # Env files
 .env
 .env.local
@@ -54,3 +60,11 @@ app/(operator-studio)/operator-studio/beta/
 app/api/beta/
 app/beta-remote/
 BETA_README.md
+.vercel
+
+# Experimental mockup surfaces — kept local for ideation, not committed.
+# `app/2/` is the older v2 sketch; `app/v3/` is the active vision-mockup
+# with its own /v3 route. Promote into the main shell when an idea is
+# ready to ship; until then these stay out of git.
+app/2/
+app/v3/

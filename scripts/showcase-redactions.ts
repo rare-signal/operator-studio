@@ -24,6 +24,31 @@ export interface Redaction {
   note?: string
 }
 
+// ── Local overrides ────────────────────────────────────────────────
+// `scripts/showcase-redactions.local.ts` is gitignored. When present,
+// its exports merge with the defaults below so each operator can
+// scrub host-specific tokens (their username, codenames, customer
+// names) without that data ever entering the public OSS file.
+//
+// Expected exports:
+//   export const REDACTIONS: Redaction[]                  (optional)
+//   export const DROP_THREAD_IF_MATCHES: Array<...>       (optional)
+//   export const EARLIEST_THREAD_DATE: string | null      (optional, overrides default)
+let _localRedactions: Redaction[] = []
+let _localDrop: Array<string | RegExp> = []
+let _localEarliestDate: string | null | undefined = undefined
+try {
+  // @ts-expect-error — file is intentionally optional, tsconfig won't see it.
+  const local = await import("./showcase-redactions.local")
+  if (Array.isArray(local.REDACTIONS)) _localRedactions = local.REDACTIONS
+  if (Array.isArray(local.DROP_THREAD_IF_MATCHES))
+    _localDrop = local.DROP_THREAD_IF_MATCHES
+  if ("EARLIEST_THREAD_DATE" in local)
+    _localEarliestDate = local.EARLIEST_THREAD_DATE
+} catch {
+  // No local overrides — fine, the defaults below are it.
+}
+
 /**
  * Earliest thread `lastActivityAt` to include in the snapshot. ISO
  * string, or `null` to disable. Threads whose last activity falls
@@ -34,7 +59,11 @@ export interface Redaction {
  * touched on or after the cutoff still ships even if it began
  * earlier.
  */
-export const EARLIEST_THREAD_DATE: string | null = "2026-04-24T00:00:00Z"
+const _DEFAULT_EARLIEST_THREAD_DATE: string | null = "2026-04-24T00:00:00Z"
+export const EARLIEST_THREAD_DATE: string | null =
+  _localEarliestDate !== undefined
+    ? _localEarliestDate
+    : _DEFAULT_EARLIEST_THREAD_DATE
 
 export const REDACTIONS: Redaction[] = [
   // ── Filesystem paths ────────────────────────────────────────────
@@ -122,6 +151,9 @@ export const REDACTIONS: Redaction[] = [
   // Examples (uncomment and edit):
   // { pattern: "ProjectCodename", replacement: "[project]", note: "Internal codename" },
   // { pattern: /\bACME-\d{4}\b/g, replacement: "[ticket]", note: "Internal ticket ids" },
+
+  // Local overrides (host-specific) merged in below.
+  ..._localRedactions,
 ]
 
 /**
@@ -145,6 +177,9 @@ export const DROP_THREAD_IF_MATCHES: Array<string | RegExp> = [
   // Examples (uncomment + adapt):
   // /\bprojectcodename\b/i,
   // /\bacmecorp\b/i,
+
+  // Local overrides (host-specific) merged in below.
+  ..._localDrop,
 ]
 
 /**

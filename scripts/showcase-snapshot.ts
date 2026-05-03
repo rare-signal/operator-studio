@@ -96,15 +96,31 @@ function sessionToThread(
     messages.some((m) => /claude/i.test(m.content))
   const sourceApp = mentionsClaude ? "claude-code" : "codex"
 
+  // Scrub claude-flavored deep-link material when we relabel a
+  // thread as codex. `sourceThreadKey` for Claude Code imports is
+  // `claude-<base64>` where the base64 wraps the *original* file
+  // path — which means redactions never see it as a string and the
+  // pre-redaction host name leaks back out via the codex:// deep
+  // link. Replace the key with a clean trailing UUID and null the
+  // locator (codex has no filesystem path semantics anyway).
+  const filePath =
+    typeof session.metadata?.filePath === "string"
+      ? (session.metadata.filePath as string)
+      : null
+  const trailingUuid = filePath?.match(/([0-9a-f-]{32,})\.jsonl?$/i)?.[1] ?? null
+
+  const sourceThreadKey =
+    sourceApp === "codex"
+      ? trailingUuid ?? threadId
+      : session.sourceThreadId
+  const sourceLocator = sourceApp === "codex" ? null : filePath
+
   const thread: OperatorThread = {
     id: threadId,
     workspaceId: SHOWCASE_WORKSPACE_ID,
     sourceApp,
-    sourceThreadKey: session.sourceThreadId,
-    sourceLocator:
-      typeof session.metadata?.filePath === "string"
-        ? (session.metadata.filePath as string)
-        : null,
+    sourceThreadKey,
+    sourceLocator,
     importedBy: SHOWCASE_OPERATOR,
     importedAt,
     importRunId: null,
