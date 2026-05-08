@@ -232,6 +232,9 @@ function makeSyntheticThread(id: OperatorSourceApp): OperatorThread {
     visibleInStudio: true,
     messageCount: 0,
     archivedAt: null,
+    markedDoneAt: null,
+    markedDoneBy: null,
+    markedDoneSource: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   }

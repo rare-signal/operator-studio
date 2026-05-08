@@ -229,13 +229,13 @@ export function getShowcaseDailyActivity(): Array<{
 // ─── Pulse graph ────────────────────────────────────────────────────────────
 
 /**
- * Pre-built `PulseGraph` for the most-recent work session. Shape
- * matches `app/2/v2/data/load-pulse.ts::PulseGraph` so the live
- * `<PulseView />` renders unchanged. Returns `null` when no session
+ * Pre-built `WorkGraph` for the most-recent work session. Shape
+ * matches `app/2/v2/data/load-work.ts::WorkGraph` so the live
+ * `<WorkView />` renders unchanged. Returns `null` when no session
  * has content — the view handles null with an empty state.
  */
-export function getShowcasePulseGraph(): unknown | null {
-  return readJsonOrNull("pulse-default.json")
+export function getShowcaseWorkGraph(): unknown | null {
+  return readJsonOrNull("work-default.json")
 }
 
 // ─── Static params helpers ──────────────────────────────────────────────────

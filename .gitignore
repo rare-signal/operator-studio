@@ -32,6 +32,9 @@ scripts/showcase-redactions.local.ts
 .env.local
 .env.*.local
 
+# Claude/Codex local worktrees are machine-local execution sandboxes.
+.claude/worktrees/
+
 # OS / editor
 .DS_Store
 *.log
@@ -68,3 +71,9 @@ BETA_README.md
 # ready to ship; until then these stay out of git.
 app/2/
 app/v3/
+
+# Lane G "Cinema" — code-first product video R&D. Self-contained sub-project
+# with its own package.json. Heavy dependencies (Remotion bundles Chromium),
+# rendered artifacts, and capture caches all live here. Will graduate to its
+# own repo if a bet earns it.
+/experiments/

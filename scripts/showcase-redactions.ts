@@ -38,13 +38,16 @@ let _localRedactions: Redaction[] = []
 let _localDrop: Array<string | RegExp> = []
 let _localEarliestDate: string | null | undefined = undefined
 try {
-  // @ts-expect-error — file is intentionally optional, tsconfig won't see it.
+  // @ts-ignore — file is intentionally optional; may or may not exist locally.
   const local = await import("./showcase-redactions.local")
   if (Array.isArray(local.REDACTIONS)) _localRedactions = local.REDACTIONS
   if (Array.isArray(local.DROP_THREAD_IF_MATCHES))
     _localDrop = local.DROP_THREAD_IF_MATCHES
-  if ("EARLIEST_THREAD_DATE" in local)
-    _localEarliestDate = local.EARLIEST_THREAD_DATE
+  if ("EARLIEST_THREAD_DATE" in local) {
+    const v = (local as { EARLIEST_THREAD_DATE?: string | null })
+      .EARLIEST_THREAD_DATE
+    if (typeof v === "string" || v === null) _localEarliestDate = v
+  }
 } catch {
   // No local overrides — fine, the defaults below are it.
 }

@@ -16,9 +16,9 @@
     },
     {
       "name": "operator-studio-preview",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["exec", "next", "dev", "--turbopack", "--port", "4201"],
-      "port": 4201
+      "runtimeExecutable": "/tmp/start-os-preview.sh",
+      "runtimeArgs": [],
+      "port": 4200
     },
     {
       "name": "operator-studio-prod",

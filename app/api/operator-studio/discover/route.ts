@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic"
 // `parseAll(source)` synchronously scans the entire session-root for that
 // importer (hundreds of multi-MB JSONL files for active users) and the
 // follow-up `importSelectedFiles` re-imports every path. Both clients
-// (dashboard.tsx, pulse-view.tsx) poll every 15s, and a tab can mount
+// (dashboard.tsx, work-view.tsx) poll every 15s, and a tab can mount
 // both. Without a server-side guard, requests pile up faster than they
 // drain — Node is single-threaded, so one stuck claude scan starves the
 // rest of the API.

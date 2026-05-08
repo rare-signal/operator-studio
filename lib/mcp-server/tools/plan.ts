@@ -27,6 +27,10 @@ import {
   getActivePlan,
   getPlanById,
   listPlans,
+  upsertPlanStep,
+  setPlanStepStatus,
+  softDeletePlanStep,
+  restorePlanStep,
 } from "@/lib/operator-studio/plans"
 import type { McpContext } from "../context.js"
 import {
@@ -235,6 +239,239 @@ export function registerPlanTools(server: McpServer, ctx: McpContext) {
           header,
         })
         return textResult(rendered.text)
+      } catch (err) {
+        return errorResult((err as Error).message)
+      }
+    }
+  )
+
+  // ─── plan.step_upsert ───────────────────────────────────────────────────
+  //
+  // Write tool. Lets agents add or edit a plan step directly instead of
+  // dropping a tsx seed script in scripts/ for the human to run. If `id`
+  // is omitted, a fresh id is generated and the step is appended.
+  server.registerTool(
+    "plan_step_upsert",
+    {
+      title: "Upsert plan step",
+      description:
+        "Insert or update a single plan step. If `id` matches an existing active step, that step is updated (title / description / status / parentStepId). If `id` is omitted or doesn't match, a new step is inserted (appended to max(stepOrder)+1 unless `stepOrder` is given). Returns the resolved step id and whether it was inserted or updated.",
+      inputSchema: {
+        title: z.string().min(1).describe("Step title."),
+        description: z.string().optional().describe("Optional long-form body."),
+        id: z
+          .string()
+          .optional()
+          .describe(
+            "Optional stable id. Omit for a fresh step; provide to update an existing one or to seed a known id."
+          ),
+        parentStepId: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Parent step id for nested cards. Null/omitted = top-level."
+          ),
+        status: z
+          .enum(["open", "in-motion", "covered", "skipped"])
+          .optional()
+          .describe("Defaults to 'open' on insert; left untouched on update."),
+        stepOrder: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            "Manual step_order for the insert path. Omit to append (default)."
+          ),
+        planId: z
+          .string()
+          .optional()
+          .describe("Target plan id. Omit to use the active plan."),
+        workspaceId: z.string().optional(),
+      },
+    },
+    async ({
+      title,
+      description,
+      id,
+      parentStepId,
+      status,
+      stepOrder,
+      planId,
+      workspaceId,
+    }) => {
+      const ws = workspaceId ?? ctx.defaultWorkspaceId
+      try {
+        const plan = planId
+          ? await getPlanById(ws, planId)
+          : await getActivePlan(ws, null, ctx.reviewer)
+        if (!plan) {
+          return errorResult(
+            `No plan found${planId ? ` with id ${planId}` : ""} in workspace ${ws}.`
+          )
+        }
+        const result = await upsertPlanStep(ws, plan.id, {
+          id,
+          title,
+          description: description ?? null,
+          status,
+          parentStepId,
+          stepOrder,
+        })
+        return textResult(
+          `${result.action === "inserted" ? "Inserted" : "Updated"} step \`${result.id}\` in plan \`${plan.id}\` (workspace \`${ws}\`).`
+        )
+      } catch (err) {
+        return errorResult((err as Error).message)
+      }
+    }
+  )
+
+  // ─── plan.step_set_status ───────────────────────────────────────────────
+  //
+  // Most-common-edit shortcut. Cheaper to call than plan_step_upsert when
+  // the only thing changing is status (open → in-motion → covered etc.).
+  server.registerTool(
+    "plan_step_set_status",
+    {
+      title: "Set plan step status",
+      description:
+        "Flip a single plan step's status (open / in-motion / covered / skipped). Returns whether the step was found and updated.",
+      inputSchema: {
+        stepId: z.string().describe("Step id to update."),
+        status: z.enum(["open", "in-motion", "covered", "skipped"]),
+        planId: z
+          .string()
+          .optional()
+          .describe("Target plan id. Omit to use the active plan."),
+        workspaceId: z.string().optional(),
+      },
+    },
+    async ({ stepId, status, planId, workspaceId }) => {
+      const ws = workspaceId ?? ctx.defaultWorkspaceId
+      try {
+        const plan = planId
+          ? await getPlanById(ws, planId)
+          : await getActivePlan(ws, null, ctx.reviewer)
+        if (!plan) {
+          return errorResult(
+            `No plan found${planId ? ` with id ${planId}` : ""} in workspace ${ws}.`
+          )
+        }
+        const r = await setPlanStepStatus(ws, plan.id, stepId, status)
+        if (!r.updated) {
+          return errorResult(
+            `Step \`${stepId}\` not found (or already trashed) in plan \`${plan.id}\`.`
+          )
+        }
+        return textResult(
+          `Set status of \`${stepId}\` to \`${status}\` in plan \`${plan.id}\`.`
+        )
+      } catch (err) {
+        return errorResult((err as Error).message)
+      }
+    }
+  )
+
+  // ─── plan.step_delete ───────────────────────────────────────────────────
+  //
+  // Soft delete. Stamps `deleted_at` so the row is recoverable from
+  // trash; the canvas filters it out immediately. Cascades to active
+  // descendants by default — flip `cascade=false` to delete just the
+  // target row (children become orphans pointing at a trashed parent).
+  server.registerTool(
+    "plan_step_delete",
+    {
+      title: "Soft-delete plan step",
+      description:
+        "Soft-delete a plan step by stamping `deleted_at`. Recoverable via plan_step_restore. Cascades to all active descendants by default; set `cascade: false` to delete only the target row. Returns the list of deleted step ids.",
+      inputSchema: {
+        stepId: z.string().describe("Step id to soft-delete."),
+        cascade: z
+          .boolean()
+          .optional()
+          .describe(
+            "When true (default), every active descendant is also soft-deleted."
+          ),
+        planId: z
+          .string()
+          .optional()
+          .describe("Target plan id. Omit to use the active plan."),
+        workspaceId: z.string().optional(),
+      },
+    },
+    async ({ stepId, cascade, planId, workspaceId }) => {
+      const ws = workspaceId ?? ctx.defaultWorkspaceId
+      try {
+        const plan = planId
+          ? await getPlanById(ws, planId)
+          : await getActivePlan(ws, null, ctx.reviewer)
+        if (!plan) {
+          return errorResult(
+            `No plan found${planId ? ` with id ${planId}` : ""} in workspace ${ws}.`
+          )
+        }
+        const r = await softDeletePlanStep(ws, plan.id, stepId, { cascade })
+        if (r.deletedIds.length === 0) {
+          return errorResult(
+            `No active step matched \`${stepId}\` in plan \`${plan.id}\` (already trashed or not found).`
+          )
+        }
+        return textResult(
+          `Soft-deleted ${r.deletedIds.length} step${r.deletedIds.length === 1 ? "" : "s"} in plan \`${plan.id}\`: ${r.deletedIds.map((id) => `\`${id}\``).join(", ")}.`
+        )
+      } catch (err) {
+        return errorResult((err as Error).message)
+      }
+    }
+  )
+
+  // ─── plan.step_restore ──────────────────────────────────────────────────
+  //
+  // Reverse of plan_step_delete — clears `deleted_at` so a trashed step
+  // is visible again. Single-row by default; cascade revives the whole
+  // trashed subtree if needed.
+  server.registerTool(
+    "plan_step_restore",
+    {
+      title: "Restore trashed plan step",
+      description:
+        "Clear `deleted_at` on a previously soft-deleted plan step. Single-row by default; pass `cascade: true` to also restore every trashed descendant in the same plan. Returns the list of restored step ids.",
+      inputSchema: {
+        stepId: z.string().describe("Step id to restore."),
+        cascade: z
+          .boolean()
+          .optional()
+          .describe(
+            "When true, also restore every trashed descendant. Default false."
+          ),
+        planId: z
+          .string()
+          .optional()
+          .describe("Target plan id. Omit to use the active plan."),
+        workspaceId: z.string().optional(),
+      },
+    },
+    async ({ stepId, cascade, planId, workspaceId }) => {
+      const ws = workspaceId ?? ctx.defaultWorkspaceId
+      try {
+        const plan = planId
+          ? await getPlanById(ws, planId)
+          : await getActivePlan(ws, null, ctx.reviewer)
+        if (!plan) {
+          return errorResult(
+            `No plan found${planId ? ` with id ${planId}` : ""} in workspace ${ws}.`
+          )
+        }
+        const r = await restorePlanStep(ws, plan.id, stepId, { cascade })
+        if (r.restoredIds.length === 0) {
+          return errorResult(
+            `No matching trashed step found for \`${stepId}\` in plan \`${plan.id}\`.`
+          )
+        }
+        return textResult(
+          `Restored ${r.restoredIds.length} step${r.restoredIds.length === 1 ? "" : "s"} in plan \`${plan.id}\`: ${r.restoredIds.map((id) => `\`${id}\``).join(", ")}.`
+        )
       } catch (err) {
         return errorResult((err as Error).message)
       }

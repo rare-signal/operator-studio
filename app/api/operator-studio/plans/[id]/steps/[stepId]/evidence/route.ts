@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server"
-import { and, eq } from "drizzle-orm"
+import { and, eq, isNull } from "drizzle-orm"
 
 import { authorizeRequest } from "@/lib/operator-studio/auth"
 import { getDb } from "@/lib/server/db/client"
@@ -49,7 +49,8 @@ export async function GET(
       and(
         eq(operatorPlanSteps.id, stepId),
         eq(operatorPlanSteps.planId, planId),
-        eq(operatorPlanSteps.workspaceId, workspaceId)
+        eq(operatorPlanSteps.workspaceId, workspaceId),
+        isNull(operatorPlanSteps.deletedAt)
       )
     )
     .limit(1)

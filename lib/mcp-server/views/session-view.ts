@@ -145,3 +145,27 @@ export function renderThreadPassages(
   }
   return lines.join("\n")
 }
+
+export function renderThreadContextPack(
+  thread: OperatorThread,
+  userMessages: OperatorThreadMessage[]
+): string {
+  const title = thread.promotedTitle ?? thread.rawTitle ?? "Untitled thread"
+  const lines: string[] = []
+  lines.push(`# Context pack: ${title}`)
+  lines.push(
+    `_thread id: ${thread.id} · ${thread.sourceApp} · ` +
+      `${thread.messageCount} total turns · ${userMessages.length} user turns_`
+  )
+  if (thread.sourceLocator) {
+    lines.push(`_source: ${thread.sourceLocator}_`)
+  }
+  lines.push("")
+  if (thread.captureReason) {
+    lines.push("## Capture reason")
+    lines.push(thread.captureReason.trim())
+    lines.push("")
+  }
+  lines.push("## User turns")
+  return lines.join("\n")
+}

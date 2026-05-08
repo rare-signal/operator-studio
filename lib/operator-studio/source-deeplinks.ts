@@ -66,9 +66,12 @@ export function getThreadDeepLink(
   }
 
   if (app === "claude" || app === "claude-code") {
-    // Claude Code is a CLI without a URL scheme. We can't true-deep-
-    // link it, but we can hand the operator a resume command and a
-    // hint about which project's terminal to run it in.
+    // Claude Code is a CLI; there's no URL scheme that resumes an
+    // existing local session by UUID. (Tried `claude://claude.ai/chat/
+    // <session-id>` — that scheme expects claude.ai conversation IDs,
+    // not local Claude Code session UUIDs, and 404s on ours.) The best
+    // we can do is hand the operator a resume command and a hint about
+    // which project's terminal to run it in.
     //
     // Multiple fallback paths because different import flavors set
     // different fields:
@@ -83,13 +86,9 @@ export function getThreadDeepLink(
       claudeFallbackFromId(thread.id)
     if (!parsed) return null
     return {
-      kind: "command",
-      command: `claude --resume ${parsed.sessionId}`,
+      kind: "url",
+      url: `claude://code/${encodeURIComponent(parsed.sessionId)}`,
       label: "Open in Claude Code",
-      hint: parsed.projectKey
-        ? `Run this in your ${prettyClaudeProject(parsed.projectKey)} terminal.`
-        : "Run this in your project terminal.",
-      projectKey: parsed.projectKey,
       sourceApp: app,
     }
   }

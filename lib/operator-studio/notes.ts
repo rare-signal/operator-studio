@@ -517,7 +517,8 @@ export async function promoteNoteToPlanSteps(
     throw new Error(`note ${noteId} not found`)
   }
 
-  // Highest existing step_order so new steps don't collide.
+  // Highest existing step_order so new steps don't collide. Skip trashed
+  // rows so the next-order allocation reflects the visible canvas.
   const maxOrderRow = await db
     .select({
       max: sql<number>`COALESCE(MAX(${operatorPlanSteps.stepOrder}), -1)`,
@@ -526,7 +527,8 @@ export async function promoteNoteToPlanSteps(
     .where(
       and(
         eq(operatorPlanSteps.workspaceId, workspaceId),
-        eq(operatorPlanSteps.planId, planId)
+        eq(operatorPlanSteps.planId, planId),
+        isNull(operatorPlanSteps.deletedAt)
       )
     )
   const baseOrder = (maxOrderRow[0]?.max ?? -1) + 1
@@ -590,14 +592,16 @@ export async function demoteStepToNotes(
 ): Promise<{ rootNoteId: string }> {
   const db = getDb()
   // Pull every step in the plan once and walk locally — keeps us to one
-  // SELECT regardless of depth.
+  // SELECT regardless of depth. Skip trashed rows so demote-to-notes only
+  // converts what's visible on the canvas.
   const allSteps = await db
     .select()
     .from(operatorPlanSteps)
     .where(
       and(
         eq(operatorPlanSteps.workspaceId, workspaceId),
-        eq(operatorPlanSteps.planId, planId)
+        eq(operatorPlanSteps.planId, planId),
+        isNull(operatorPlanSteps.deletedAt)
       )
     )
   const root = allSteps.find((s) => s.id === stepId)
@@ -657,13 +661,18 @@ export async function demoteStepToNotes(
         updatedAt: now,
       })
     }
-    // Delete the original step (children cascade via FK).
+    // Soft-delete the original step + every descendant we just demoted
+    // to notes. Stamps `deleted_at` so the rows stay recoverable from
+    // trash; active reads filter them out, which removes them from the
+    // canvas. (Previously this was a hard delete that cascaded via FK.)
+    const demotedIds = ordered.map((s) => s.id)
     await tx
-      .delete(operatorPlanSteps)
+      .update(operatorPlanSteps)
+      .set({ deletedAt: now, updatedAt: now })
       .where(
         and(
           eq(operatorPlanSteps.workspaceId, workspaceId),
-          eq(operatorPlanSteps.id, stepId)
+          inArray(operatorPlanSteps.id, demotedIds)
         )
       )
   })

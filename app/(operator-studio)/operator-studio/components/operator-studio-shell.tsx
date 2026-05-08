@@ -1,8 +1,10 @@
 "use client"
 
 import * as React from "react"
+import Link from "next/link"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import {
+  BookOpen,
   Brain,
   ChevronRight,
   Download,
@@ -10,7 +12,10 @@ import {
   Activity,
   BarChart3,
   CircleDot,
+  Footprints,
+  Grid3x3,
   HelpCircle,
+  Radio,
   Layers,
   Lock,
   Map as MapIcon,
@@ -19,6 +24,7 @@ import {
   Search,
   Settings,
   Star,
+  Target,
   Terminal,
   Trophy,
   User,
@@ -402,19 +408,18 @@ function OperatorStudioSidebar({
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton
-              size="lg"
-              onClick={() => router.push("/operator-studio")}
-            >
-              <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <Terminal className="size-4" />
-              </div>
-              <div className="flex flex-col gap-0.5 leading-none">
-                <span className="font-semibold">Operator Studio</span>
-                <span className="text-xs text-muted-foreground">
-                  Agent session review
-                </span>
-              </div>
+            <SidebarMenuButton size="lg" asChild>
+              <Link href="/operator-studio">
+                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                  <Terminal className="size-4" />
+                </div>
+                <div className="flex flex-col gap-0.5 leading-none">
+                  <span className="font-semibold">Operator Studio</span>
+                  <span className="text-xs text-muted-foreground">
+                    Agent session review
+                  </span>
+                </div>
+              </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -452,32 +457,69 @@ function OperatorStudioSidebar({
                   so we treat that path as Work-active too. */}
               <SidebarMenuItem>
                 <SidebarMenuButton
+                  asChild
                   isActive={
                     pathname === "/operator-studio/plan" &&
                     searchParams.get("tab") !== "work"
                   }
-                  onClick={() => router.push("/operator-studio/plan")}
                 >
-                  <MapIcon className="size-4" />
-                  Plan
+                  <Link href="/operator-studio/plan">
+                    <MapIcon className="size-4" />
+                    Plan
+                  </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton
+                  asChild
                   isActive={
                     pathname === "/operator-studio/pulse" ||
                     (pathname === "/operator-studio/plan" &&
                       searchParams.get("tab") === "work")
                   }
-                  onClick={() =>
-                    router.push("/operator-studio/plan?tab=work")
+                >
+                  <Link href="/operator-studio/plan?tab=work">
+                    <CircleDot className="size-4" />
+                    Work
+                    <span className="ml-auto text-[8px] uppercase tracking-widest text-emerald-600 dark:text-emerald-400">
+                      live
+                    </span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={
+                    pathname === "/operator-studio/plan" &&
+                    searchParams.get("tab") === "bento"
                   }
                 >
-                  <CircleDot className="size-4" />
-                  Work
-                  <span className="ml-auto text-[8px] uppercase tracking-widest text-emerald-600 dark:text-emerald-400">
-                    live
-                  </span>
+                  <Link href="/operator-studio/plan?tab=bento">
+                    <Grid3x3 className="size-4" />
+                    Bento
+                    <span className="ml-auto text-[8px] uppercase tracking-widest text-stone-400 dark:text-stone-500">
+                      new
+                    </span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              {/* Operations — tactical command desk. Pairs in-motion
+                  cards with the agent threads claiming them. Strategic
+                  Plan + raw Bento are the two ends; this is the live
+                  execution view between them. */}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname.startsWith("/operator-studio/operations")}
+                >
+                  <Link href="/operator-studio/operations">
+                    <Target className="size-4" />
+                    Operations
+                    <span className="ml-auto text-[8px] uppercase tracking-widest text-stone-400 dark:text-stone-500">
+                      scaffold
+                    </span>
+                  </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
@@ -494,20 +536,46 @@ function OperatorStudioSidebar({
             <SidebarMenu>
               <SidebarMenuItem>
                 <SidebarMenuButton
+                  asChild
                   isActive={pathname === "/operator-studio/activity"}
-                  onClick={() => router.push("/operator-studio/activity")}
                 >
-                  <Activity className="size-4" />
-                  Activity Log
+                  <Link href="/operator-studio/activity">
+                    <Activity className="size-4" />
+                    Activity Log
+                  </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton
+                  asChild
                   isActive={pathname === "/operator-studio/metrics"}
-                  onClick={() => router.push("/operator-studio/metrics")}
                 >
-                  <BarChart3 className="size-4" />
-                  Metrics
+                  <Link href="/operator-studio/metrics">
+                    <BarChart3 className="size-4" />
+                    Metrics
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname.startsWith("/operator-studio/knowledge")}
+                >
+                  <Link href="/operator-studio/knowledge">
+                    <BookOpen className="size-4" />
+                    Knowledge Base
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname.startsWith("/operator-studio/echoes")}
+                >
+                  <Link href="/operator-studio/echoes">
+                    <Radio className="size-4" />
+                    Echoes
+                  </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
@@ -548,27 +616,29 @@ function OperatorStudioSidebar({
                   ).map(([state, Icon, label]) => (
                     <SidebarMenuSubItem key={state}>
                       <SidebarMenuSubButton
+                        asChild
                         isActive={
                           pathname === "/operator-studio/memory" &&
                           (state === "promoted"
                             ? activeView === "promoted"
                             : activeStateFilter === state)
                         }
-                        onClick={() =>
-                          router.push(
+                      >
+                        <Link
+                          href={
                             state === "promoted"
                               ? `/operator-studio/memory?view=promoted`
                               : `/operator-studio/memory?state=${state}`
-                          )
-                        }
-                      >
-                        <Icon className="size-3 shrink-0" />
-                        <span className="truncate">{label}</span>
-                        {stateCounts[state] > 0 && (
-                          <span className="ml-auto shrink-0 tabular-nums text-[10px] text-muted-foreground/60">
-                            {stateCounts[state]}
-                          </span>
-                        )}
+                          }
+                        >
+                          <Icon className="size-3 shrink-0" />
+                          <span className="truncate">{label}</span>
+                          {stateCounts[state] > 0 && (
+                            <span className="ml-auto shrink-0 tabular-nums text-[10px] text-muted-foreground/60">
+                              {stateCounts[state]}
+                            </span>
+                          )}
+                        </Link>
                       </SidebarMenuSubButton>
                     </SidebarMenuSubItem>
                   ))}
@@ -599,26 +669,26 @@ function OperatorStudioSidebar({
                     .map(([source, count]) => (
                       <SidebarMenuSubItem key={source}>
                         <SidebarMenuSubButton
+                          asChild
                           isActive={
                             pathname === "/operator-studio/memory" &&
                             activeSourceFilter === source
                           }
-                          onClick={() =>
-                            router.push(
-                              `/operator-studio/memory?source=${source}`
-                            )
-                          }
                         >
-                          <SourceAppToken
-                            source={source}
-                            variant="plain"
-                            size="sm"
-                            className="min-w-0 flex-1 text-sidebar-foreground"
-                            labelClassName="truncate"
-                          />
-                          <span className="ml-auto shrink-0 tabular-nums text-[10px] text-muted-foreground/60">
-                            {count}
-                          </span>
+                          <Link
+                            href={`/operator-studio/memory?source=${source}`}
+                          >
+                            <SourceAppToken
+                              source={source}
+                              variant="plain"
+                              size="sm"
+                              className="min-w-0 flex-1 text-sidebar-foreground"
+                              labelClassName="truncate"
+                            />
+                            <span className="ml-auto shrink-0 tabular-nums text-[10px] text-muted-foreground/60">
+                              {count}
+                            </span>
+                          </Link>
                         </SidebarMenuSubButton>
                       </SidebarMenuSubItem>
                     ))}
@@ -638,20 +708,24 @@ function OperatorStudioSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton
+              asChild
               isActive={pathname === "/operator-studio/admin"}
-              onClick={() => router.push("/operator-studio/admin")}
             >
-              <Settings className="size-4" />
-              Admin
+              <Link href="/operator-studio/admin">
+                <Settings className="size-4" />
+                Admin
+              </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
+              asChild
               isActive={pathname === "/operator-studio/docs"}
-              onClick={() => router.push("/operator-studio/docs")}
             >
-              <HelpCircle className="size-4" />
-              Help
+              <Link href="/operator-studio/docs">
+                <HelpCircle className="size-4" />
+                Help
+              </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>

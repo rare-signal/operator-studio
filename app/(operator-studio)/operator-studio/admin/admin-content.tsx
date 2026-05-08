@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   Sparkles,
   Sun,
+  Tag,
   Webhook,
 } from "lucide-react"
 import Link from "next/link"
@@ -19,6 +20,7 @@ import Link from "next/link"
 import { Button } from "@/registry/new-york-v4/ui/button"
 import { Separator } from "@/registry/new-york-v4/ui/separator"
 import type { WorkspaceSummary } from "@/app/components/workspace-switcher"
+import { PromotionLabelsPanel } from "./promotion-labels-panel"
 import { TokensPanel } from "./tokens-panel"
 import { WebhooksPanel } from "./webhooks-panel"
 
@@ -28,7 +30,12 @@ interface AdminContentProps {
   donePhrase: string
 }
 
-type AdminSection = "tokens" | "webhooks" | "completion" | "beta"
+type AdminSection =
+  | "tokens"
+  | "webhooks"
+  | "completion"
+  | "labels"
+  | "beta"
 
 const BETA_FEATURES: Array<{
   href: string
@@ -149,6 +156,18 @@ export function AdminContent({
         </button>
         <button
           type="button"
+          onClick={() => setSection("labels")}
+          className={`flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+            section === "labels"
+              ? "bg-muted text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Tag className="h-4 w-4" />
+          Promotion labels
+        </button>
+        <button
+          type="button"
           onClick={() => setSection("beta")}
           className={`flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
             section === "beta"
@@ -168,6 +187,7 @@ export function AdminContent({
         <WebhooksPanel activeWorkspace={activeWorkspace} />
       )}
       {section === "completion" && <ThreadDonePanel donePhrase={donePhrase} />}
+      {section === "labels" && <PromotionLabelsPanel />}
       {section === "beta" && <BetaFeaturesPanel />}
     </div>
   )

@@ -2,13 +2,13 @@ import type { Metadata } from "next"
 import { Suspense } from "react"
 
 import { loadActivePlan } from "@/app/2/v2/data/load"
-import { loadPulseGraph, selectorFromQuery } from "@/app/2/v2/data/load-pulse"
+import { loadWorkGraph, selectorFromQuery } from "@/app/2/v2/data/load-work"
 import { PlanAndWork } from "@/app/2/v2/components/plan-and-work"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
-import type { PulseGraph } from "@/app/2/v2/data/load-pulse"
+import type { WorkGraph } from "@/app/2/v2/data/load-work"
 import {
   getShowcaseActivePlanAdapted,
-  getShowcasePulseGraph,
+  getShowcaseWorkGraph,
   isShowcase,
 } from "@/lib/operator-studio/showcase-loader"
 
@@ -64,16 +64,23 @@ async function PlanAndWorkContent({
 }) {
   const params = await searchParams
   const rawTab = pickFirst(params.tab)
-  const tab: "plan" | "work" = rawTab === "work" ? "work" : "plan"
+  const tab: "plan" | "work" | "bento" | "today" =
+    rawTab === "work"
+      ? "work"
+      : rawTab === "bento"
+        ? "bento"
+        : rawTab === "today"
+          ? "today"
+          : "plan"
 
   if (isShowcase()) {
     return (
       <PlanAndWork
         plan={getShowcaseActivePlanAdapted()}
-        pulseGraph={getShowcasePulseGraph() as PulseGraph | null}
-        previousPulseGraph={null}
+        workGraph={getShowcaseWorkGraph() as WorkGraph | null}
+        previousWorkGraph={null}
         initialTab={tab}
-        pulseHomePrefix="/operator-studio"
+        workHomePrefix="/operator-studio"
         llmConfigured={false}
       />
     )
@@ -89,32 +96,32 @@ async function PlanAndWorkContent({
   // Load both surfaces in parallel — the combined view mounts them
   // simultaneously and toggles with CSS, so we want both tabs' data
   // ready on first paint regardless of which one the URL picks.
-  const [plan, pulseGraph] = await Promise.all([
+  const [plan, workGraph] = await Promise.all([
     loadActivePlan(workspaceId, planIdOverride).catch(() => null),
-    loadPulseGraph(workspaceId, selector).catch(() => null),
+    loadWorkGraph(workspaceId, selector).catch(() => null),
   ])
   // When the live session is "just getting started" (mirrors the
-  // todTail < 15 min check in pulse-view.tsx), eagerly load the
+  // todTail < 15 min check in work-view.tsx), eagerly load the
   // previous session so Pulse can render it inline below a horizontal
   // rule. Keeps the surface useful before the new session has
   // accumulated anything to look at.
-  const previousPulseGraph =
-    pulseGraph &&
-    pulseGraph.mode === "single" &&
-    pulseGraph.session.durationMinutes < 15 &&
-    pulseGraph.prevSessionId
-      ? await loadPulseGraph(workspaceId, {
+  const previousWorkGraph =
+    workGraph &&
+    workGraph.mode === "single" &&
+    workGraph.session.durationMinutes < 15 &&
+    workGraph.prevSessionId
+      ? await loadWorkGraph(workspaceId, {
           kind: "single",
-          sessionId: pulseGraph.prevSessionId,
+          sessionId: workGraph.prevSessionId,
         }).catch(() => null)
       : null
   return (
     <PlanAndWork
       plan={plan}
-      pulseGraph={pulseGraph}
-      previousPulseGraph={previousPulseGraph}
+      workGraph={workGraph}
+      previousWorkGraph={previousWorkGraph}
       initialTab={tab}
-      pulseHomePrefix="/operator-studio"
+      workHomePrefix="/operator-studio"
       llmConfigured={llmConfigured}
     />
   )

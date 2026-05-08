@@ -2,6 +2,12 @@
 @import "tw-animate-css";
 @import "./shadcn-tailwind.css";
 
+/* `app/2/` and `app/v3/` are gitignored experimental mockup surfaces.
+   Tailwind v4's auto-detect skips gitignored paths, so classes used
+   only there (e.g. the Pulse lane tints) wouldn't get generated. */
+@source "../app/2/**/*.{js,ts,jsx,tsx}";
+@source "../app/v3/**/*.{js,ts,jsx,tsx}";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

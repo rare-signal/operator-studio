@@ -109,6 +109,7 @@ import {
 } from "@/lib/operator-studio/types"
 import { MarkdownProse } from "./markdown-prose"
 import { PassageHighlights } from "./passage-highlights"
+import { ContinuumButton } from "./continuum-button"
 import { PromoteMessageDialog } from "./promote-message-dialog"
 import { SelectionActionBar } from "./selection-action-bar"
 import { SourceDeepLinkButton } from "./source-deeplink-button"
@@ -1203,6 +1204,7 @@ export function ThreadDetail({
               )}
               {isDone ? "Reopen" : "Done"}
             </Button>
+            <ContinuumButton threadId={thread.id} />
             {thread.reviewState !== "promoted" && (
               <PromoteDialog threadId={thread.id} currentThread={thread} />
             )}
@@ -2472,7 +2474,21 @@ function TimelineMessage({
             // overlay rectangles resolve to this bubble's coordinate
             // system instead of escaping to the viewport.
             data-passage-message-id={msg.id}
-            className={`relative rounded-lg px-4 py-3 text-[15px] leading-relaxed ${
+            data-passage-message-role={msg.role}
+            // `select-text` is explicit so an inherited `select-none`
+            // anywhere up the tree (sidebar items, sticky chrome) can't
+            // accidentally block selection on user bubbles. The user
+            // turns are first-class promote/highlight targets just like
+            // assistant turns are; selecting your own dropped bars
+            // matters as much as selecting the AI's.
+            //
+            // `selection:bg-emerald-500/35 selection:text-foreground`
+            // makes the active selection unmistakable on the tinted
+            // user bubble (where the default browser highlight blends
+            // into the primary/8 wash and you'd swear you weren't
+            // selecting anything). Same rule lit up on assistant
+            // bubbles for visual consistency.
+            className={`relative rounded-lg px-4 py-3 text-[15px] leading-relaxed select-text selection:bg-emerald-500/35 selection:text-foreground dark:selection:bg-emerald-500/45 ${
               isUser
                 ? "border border-primary/20 bg-primary/8 text-foreground dark:bg-primary/10"
                 : isTranscript

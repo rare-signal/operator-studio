@@ -20,7 +20,7 @@
 
 import "server-only"
 
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm"
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
 import {
@@ -83,7 +83,12 @@ async function loadStepsFor(
   const rows = await db
     .select()
     .from(operatorPlanSteps)
-    .where(inArray(operatorPlanSteps.planId, planIds))
+    .where(
+      and(
+        inArray(operatorPlanSteps.planId, planIds),
+        isNull(operatorPlanSteps.deletedAt)
+      )
+    )
     .orderBy(asc(operatorPlanSteps.stepOrder))
   const out = new Map<string, OperatorPlanStep[]>()
   for (const r of rows) {
@@ -444,10 +449,17 @@ export async function setPlanSteps(
   const now = new Date()
 
   // Load current step ids for this plan so we can compute deletions.
+  // Skip trashed rows so they don't get treated as "missing from the diff"
+  // and silently revived.
   const existing = await db
     .select({ id: operatorPlanSteps.id })
     .from(operatorPlanSteps)
-    .where(eq(operatorPlanSteps.planId, planId))
+    .where(
+      and(
+        eq(operatorPlanSteps.planId, planId),
+        isNull(operatorPlanSteps.deletedAt)
+      )
+    )
   const existingIds = new Set(existing.map((r) => r.id))
   const keepIds = new Set<string>()
   const toInsert: (typeof operatorPlanSteps.$inferInsert)[] = []
@@ -487,8 +499,12 @@ export async function setPlanSteps(
   const toDelete = [...existingIds].filter((id) => !keepIds.has(id))
 
   if (toDelete.length > 0) {
+    // Soft delete — stamp `deleted_at` so the row is recoverable from
+    // trash. Active reads filter `deleted_at IS NULL`, so the cards
+    // disappear from the canvas immediately.
     await db
-      .delete(operatorPlanSteps)
+      .update(operatorPlanSteps)
+      .set({ deletedAt: now, updatedAt: now })
       .where(inArray(operatorPlanSteps.id, toDelete))
   }
   if (toInsert.length > 0) {
@@ -610,8 +626,13 @@ export async function deletePlanStep(
 ): Promise<OperatorSessionPlan | null> {
   const db = getDb()
   const now = new Date()
+  // Soft delete — stamp `deleted_at` instead of removing the row, so the
+  // step is recoverable from trash. The previous hard-delete cascaded
+  // through children via FK, which made an accidental click on a parent
+  // unrecoverable; soft-delete preserves the subtree intact.
   await db
-    .delete(operatorPlanSteps)
+    .update(operatorPlanSteps)
+    .set({ deletedAt: now, updatedAt: now })
     .where(
       and(
         eq(operatorPlanSteps.id, stepId),
@@ -624,4 +645,296 @@ export async function deletePlanStep(
     .set({ updatedAt: now })
     .where(eq(operatorPlans.id, planId))
   return getPlanById(workspaceId, planId)
+}
+
+// ─── Step writes for MCP / agent use ───────────────────────────────────────
+//
+// These helpers exist so that AI agents can edit plans through the MCP
+// server without falling back to ad-hoc seed scripts. Keep them small,
+// id-stable, and tolerant of "id not yet known" callers.
+
+export interface UpsertPlanStepInput {
+  /** Optional. If omitted, a new id is generated. If provided and
+   *  matches an existing row, that row is updated. */
+  id?: string
+  title: string
+  description?: string | null
+  status?: "open" | "in-motion" | "covered" | "skipped"
+  parentStepId?: string | null
+  /** When omitted on insert, the new step is appended (max(stepOrder) + 1
+   *  within the plan). Ignored on update. */
+  stepOrder?: number
+}
+
+export interface UpsertPlanStepResult {
+  id: string
+  action: "inserted" | "updated"
+}
+
+/**
+ * Insert a new plan step or update an existing one (matched by id).
+ *
+ * If `id` is omitted, a fresh `step-<random>` id is generated and the
+ * step is appended to the plan with status "open".
+ *
+ * If `id` is provided and matches an active row, that row is updated
+ * (title / description / status / parentStepId only — stepOrder is
+ * preserved).
+ *
+ * If `id` is provided but no active row matches, it's treated as an
+ * insert with the provided id. Trashed rows with the same id are
+ * untouched (call restorePlanStep + upsert if you want to revive them).
+ */
+export async function upsertPlanStep(
+  workspaceId: string,
+  planId: string,
+  input: UpsertPlanStepInput
+): Promise<UpsertPlanStepResult> {
+  const db = getDb()
+  const now = new Date()
+
+  if (input.id) {
+    const existing = await db
+      .select({ id: operatorPlanSteps.id })
+      .from(operatorPlanSteps)
+      .where(
+        and(
+          eq(operatorPlanSteps.id, input.id),
+          eq(operatorPlanSteps.planId, planId),
+          eq(operatorPlanSteps.workspaceId, workspaceId),
+          isNull(operatorPlanSteps.deletedAt)
+        )
+      )
+      .limit(1)
+
+    if (existing.length > 0) {
+      await updatePlanStep(workspaceId, planId, input.id, {
+        title: input.title,
+        description: input.description ?? undefined,
+        status: input.status,
+        parentStepId: input.parentStepId,
+      })
+      return { id: input.id, action: "updated" }
+    }
+  }
+
+  const id =
+    input.id ??
+    `step-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`
+
+  let stepOrder = input.stepOrder
+  if (stepOrder === undefined) {
+    const maxRow = await db
+      .select({
+        max: sql<number>`COALESCE(MAX(${operatorPlanSteps.stepOrder}), -1)`,
+      })
+      .from(operatorPlanSteps)
+      .where(
+        and(
+          eq(operatorPlanSteps.planId, planId),
+          isNull(operatorPlanSteps.deletedAt)
+        )
+      )
+    stepOrder = (maxRow[0]?.max ?? -1) + 1
+  }
+
+  await db.insert(operatorPlanSteps).values({
+    id,
+    planId,
+    workspaceId,
+    title: input.title.trim() || "Untitled step",
+    description: input.description ?? null,
+    stepOrder,
+    status: input.status ?? "open",
+    parentStepId: input.parentStepId ?? null,
+    createdAt: now,
+    updatedAt: now,
+  })
+
+  await db
+    .update(operatorPlans)
+    .set({ updatedAt: now })
+    .where(eq(operatorPlans.id, planId))
+
+  return { id, action: "inserted" }
+}
+
+/** Narrow update of a single step's status. Cheaper-to-call sibling of
+ *  updatePlanStep for the most common edit. */
+export async function setPlanStepStatus(
+  workspaceId: string,
+  planId: string,
+  stepId: string,
+  status: "open" | "in-motion" | "covered" | "skipped"
+): Promise<{ updated: boolean }> {
+  const db = getDb()
+  const now = new Date()
+  const result = await db
+    .update(operatorPlanSteps)
+    .set({ status, updatedAt: now })
+    .where(
+      and(
+        eq(operatorPlanSteps.id, stepId),
+        eq(operatorPlanSteps.planId, planId),
+        eq(operatorPlanSteps.workspaceId, workspaceId),
+        isNull(operatorPlanSteps.deletedAt)
+      )
+    )
+    .returning({ id: operatorPlanSteps.id })
+  if (result.length === 0) return { updated: false }
+  await db
+    .update(operatorPlans)
+    .set({ updatedAt: now })
+    .where(eq(operatorPlans.id, planId))
+  return { updated: true }
+}
+
+/**
+ * Soft-delete a plan step. With `cascade: true` (default), every active
+ * descendant in the same plan is also stamped `deleted_at`, so the
+ * subtree disappears from the canvas as a unit. Pass `cascade: false`
+ * to delete just the target row (children become orphans pointing at a
+ * trashed parent — usually only useful when re-parenting first).
+ */
+export async function softDeletePlanStep(
+  workspaceId: string,
+  planId: string,
+  stepId: string,
+  opts: { cascade?: boolean } = {}
+): Promise<{ deletedIds: string[] }> {
+  const cascade = opts.cascade ?? true
+  const db = getDb()
+  const now = new Date()
+
+  const targetIds = new Set<string>([stepId])
+
+  if (cascade) {
+    // Single SELECT, walk the tree locally — same shape as
+    // demoteStepToNotes. Only consider active rows; already-trashed
+    // descendants are already trashed.
+    const allActive = await db
+      .select({ id: operatorPlanSteps.id, parentStepId: operatorPlanSteps.parentStepId })
+      .from(operatorPlanSteps)
+      .where(
+        and(
+          eq(operatorPlanSteps.workspaceId, workspaceId),
+          eq(operatorPlanSteps.planId, planId),
+          isNull(operatorPlanSteps.deletedAt)
+        )
+      )
+    const childrenByParent = new Map<string, string[]>()
+    for (const r of allActive) {
+      if (!r.parentStepId) continue
+      const arr = childrenByParent.get(r.parentStepId) ?? []
+      arr.push(r.id)
+      childrenByParent.set(r.parentStepId, arr)
+    }
+    const queue = [stepId]
+    while (queue.length > 0) {
+      const cur = queue.shift()!
+      for (const child of childrenByParent.get(cur) ?? []) {
+        if (!targetIds.has(child)) {
+          targetIds.add(child)
+          queue.push(child)
+        }
+      }
+    }
+  }
+
+  const ids = [...targetIds]
+  const result = await db
+    .update(operatorPlanSteps)
+    .set({ deletedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(operatorPlanSteps.workspaceId, workspaceId),
+        eq(operatorPlanSteps.planId, planId),
+        inArray(operatorPlanSteps.id, ids),
+        isNull(operatorPlanSteps.deletedAt)
+      )
+    )
+    .returning({ id: operatorPlanSteps.id })
+
+  if (result.length > 0) {
+    await db
+      .update(operatorPlans)
+      .set({ updatedAt: now })
+      .where(eq(operatorPlans.id, planId))
+  }
+
+  return { deletedIds: result.map((r) => r.id) }
+}
+
+/** Reverse of softDeletePlanStep — clears `deleted_at` so the row is
+ *  visible again. Single-row by default; pass `cascade: true` to also
+ *  restore every trashed descendant in the same plan. */
+export async function restorePlanStep(
+  workspaceId: string,
+  planId: string,
+  stepId: string,
+  opts: { cascade?: boolean } = {}
+): Promise<{ restoredIds: string[] }> {
+  const cascade = opts.cascade ?? false
+  const db = getDb()
+  const now = new Date()
+
+  const targetIds = new Set<string>([stepId])
+
+  if (cascade) {
+    // Walk trashed descendants — these are rows where deleted_at IS NOT
+    // NULL but parent links still resolve. Single SELECT over all rows
+    // (active + trashed), walk locally.
+    const allRows = await db
+      .select({
+        id: operatorPlanSteps.id,
+        parentStepId: operatorPlanSteps.parentStepId,
+        deletedAt: operatorPlanSteps.deletedAt,
+      })
+      .from(operatorPlanSteps)
+      .where(
+        and(
+          eq(operatorPlanSteps.workspaceId, workspaceId),
+          eq(operatorPlanSteps.planId, planId)
+        )
+      )
+    const childrenByParent = new Map<string, string[]>()
+    for (const r of allRows) {
+      if (!r.parentStepId || r.deletedAt === null) continue
+      const arr = childrenByParent.get(r.parentStepId) ?? []
+      arr.push(r.id)
+      childrenByParent.set(r.parentStepId, arr)
+    }
+    const queue = [stepId]
+    while (queue.length > 0) {
+      const cur = queue.shift()!
+      for (const child of childrenByParent.get(cur) ?? []) {
+        if (!targetIds.has(child)) {
+          targetIds.add(child)
+          queue.push(child)
+        }
+      }
+    }
+  }
+
+  const ids = [...targetIds]
+  const result = await db
+    .update(operatorPlanSteps)
+    .set({ deletedAt: null, updatedAt: now })
+    .where(
+      and(
+        eq(operatorPlanSteps.workspaceId, workspaceId),
+        eq(operatorPlanSteps.planId, planId),
+        inArray(operatorPlanSteps.id, ids)
+      )
+    )
+    .returning({ id: operatorPlanSteps.id })
+
+  if (result.length > 0) {
+    await db
+      .update(operatorPlans)
+      .set({ updatedAt: now })
+      .where(eq(operatorPlans.id, planId))
+  }
+
+  return { restoredIds: result.map((r) => r.id) }
 }

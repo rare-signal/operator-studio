@@ -19,14 +19,24 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
 
 import {
+  getVisibleThreads,
   getThreadById,
   getThreadMessages,
   getThreadSummaries,
 } from "@/lib/operator-studio/queries"
-import type { OperatorThreadMessage } from "@/lib/operator-studio/types"
+import type {
+  OperatorThread,
+  OperatorThreadMessage,
+} from "@/lib/operator-studio/types"
 import type { McpContext } from "../context.js"
-import { capTextWithBudget, renderListWithBudget } from "../budget.js"
 import {
+  DEFAULT_BUDGET_TOKENS,
+  capTextWithBudget,
+  estimateTokens,
+  renderListWithBudget,
+} from "../budget.js"
+import {
+  renderThreadContextPack,
   renderThreadPassages,
   renderThreadSummary,
 } from "../views/session-view.js"
@@ -54,6 +64,71 @@ function buildSnippet(content: string, query: string): string {
   return `${head}${content.slice(start, end)}${tail}`
 }
 
+function renderContextPackMessages({
+  thread,
+  messages,
+  budgetTokens,
+}: {
+  thread: OperatorThread
+  messages: OperatorThreadMessage[]
+  budgetTokens: number
+}): string {
+  const header = renderThreadContextPack(thread, messages)
+    .split("\n")
+    .slice(0, 8)
+    .join("\n")
+
+  if (messages.length === 0) {
+    return `${header}\n\n_No user turns found in this thread._`
+  }
+
+  const allTurns = messages
+    .map((m) => `## Turn ${m.turnIndex} · ${m.role}\n\n${m.content.trim()}\n`)
+    .join("\n")
+  const allText = `${header}\n\n${allTurns}`
+  if (estimateTokens(allText) <= budgetTokens) return allText
+
+  const budgetChars = budgetTokens * 4
+  const selected: OperatorThreadMessage[] = []
+  let bodyChars = header.length + 2
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const piece =
+      `## Turn ${messages[i].turnIndex} · ${messages[i].role}\n\n` +
+      `${messages[i].content.trim()}\n\n`
+    if (bodyChars + piece.length > budgetChars) break
+    selected.unshift(messages[i])
+    bodyChars += piece.length
+  }
+
+  if (selected.length === 0) {
+    const latest = messages[messages.length - 1]
+    const prefix = `## Turn ${latest.turnIndex} · ${latest.role}\n\n`
+    const availableChars = Math.max(
+      0,
+      budgetChars - header.length - prefix.length - 320
+    )
+    const content =
+      latest.content.length <= availableChars
+        ? latest.content.trim()
+        : `${latest.content
+            .slice(0, availableChars)
+            .trimEnd()}\n\n[turn truncated to fit budget]`
+    selected.push({ ...latest, content })
+  }
+
+  const recentTurns = selected
+    .map((m) => `## Turn ${m.turnIndex} · ${m.role}\n\n${m.content.trim()}\n`)
+    .join("\n")
+  const omitted = messages.length - selected.length
+  return (
+    `${header}\n\n${recentTurns}\n\n` +
+    `[truncated: ${omitted} of ${messages.length} user turns omitted from ` +
+    `the beginning of the thread to fit the ${budgetTokens}-token budget. ` +
+    "Call thread_passages with a targeted query or pass a larger " +
+    "budgetTokens value if your client can spare the context.]\n"
+  )
+}
+
 export function registerThreadTools(server: McpServer, ctx: McpContext) {
   // ─── thread.summary ─────────────────────────────────────────────────────
   server.registerTool(
@@ -78,6 +153,60 @@ export function registerThreadTools(server: McpServer, ctx: McpContext) {
         const text = renderThreadSummary(thread, summaries)
         const capped = capTextWithBudget(text)
         return textResult(capped.text)
+      } catch (err) {
+        return errorResult((err as Error).message)
+      }
+    }
+  )
+
+  // ─── thread.context_pack ─────────────────────────────────────────────────
+  server.registerTool(
+    "thread_context_pack",
+    {
+      title: "Thread context pack",
+      description:
+        "Compact pickup context for continuing work from a thread. Includes thread metadata and all user turns when they fit; otherwise returns the most recent user turns with an explicit truncation note. If threadId is omitted, uses the most recent visible thread in the workspace.",
+      inputSchema: {
+        threadId: z
+          .string()
+          .optional()
+          .describe("Thread id. Omit to use the most recent visible thread."),
+        workspaceId: z.string().optional(),
+        budgetTokens: z
+          .number()
+          .int()
+          .min(500)
+          .max(32000)
+          .optional()
+          .describe(
+            `Approximate response budget. Default ${DEFAULT_BUDGET_TOKENS}.`
+          ),
+      },
+    },
+    async ({ threadId, workspaceId, budgetTokens }) => {
+      const ws = workspaceId ?? ctx.defaultWorkspaceId
+      const budget = budgetTokens ?? DEFAULT_BUDGET_TOKENS
+      try {
+        const thread = threadId
+          ? await getThreadById(ws, threadId)
+          : (await getVisibleThreads(ws, { limit: 1 }))[0] ?? null
+        if (!thread) {
+          return errorResult(
+            threadId
+              ? `Thread ${threadId} not found in workspace ${ws}.`
+              : `No visible threads found in workspace ${ws}.`
+          )
+        }
+        const messages = (await getThreadMessages(ws, thread.id)).filter(
+          (m) => m.role === "user" && m.content.trim().length > 0
+        )
+        return textResult(
+          renderContextPackMessages({
+            thread,
+            messages,
+            budgetTokens: budget,
+          })
+        )
       } catch (err) {
         return errorResult((err as Error).message)
       }

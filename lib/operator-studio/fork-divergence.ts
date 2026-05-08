@@ -17,7 +17,7 @@
  * detail view wants to collapse that block by default and jump the
  * reader straight to the fork point.
  *
- * Algorithm (canonical-source, lifted from load-pulse):
+ * Algorithm (canonical-source, lifted from load-work):
  *
  *   1. Find candidate siblings for the target thread. For kickoff
  *      siblings: threads in the same workspace whose first-60-char
@@ -49,7 +49,7 @@ import type { OperatorThread } from "@/lib/operator-studio/types"
 // ─── Text signatures ──────────────────────────────────────────────────────
 
 /** Normalize a title for kickoff-sibling grouping — collapse whitespace,
- *  lowercase, slice to 60 chars. Mirrors load-pulse.ts. */
+ *  lowercase, slice to 60 chars. Mirrors load-work.ts. */
 export function titleSignature(title: string): string {
   return title.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 60)
 }

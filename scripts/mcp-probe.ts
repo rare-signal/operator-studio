@@ -131,6 +131,13 @@ async function main() {
       limit: 3,
     })
     process.stdout.write(extractText(passages))
+
+    process.stdout.write(banner(`thread_context_pack ${threadIdMatch[1]}`))
+    const contextPack = await call(client, "thread_context_pack", {
+      threadId: threadIdMatch[1],
+      budgetTokens: 1200,
+    })
+    process.stdout.write(extractText(contextPack))
   }
 
   await client.close()

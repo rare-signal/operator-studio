@@ -167,6 +167,7 @@ function SuperSearchDialog({
                 titleHighlighted: t.promotedTitle ?? t.rawTitle ?? "Untitled",
               }))
             setResults({
+              query: trimmed,
               threads: matched as unknown as ThreadHit[],
               messages: [],
             })

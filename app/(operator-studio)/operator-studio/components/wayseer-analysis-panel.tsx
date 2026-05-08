@@ -23,7 +23,10 @@ import type {
   EnrichmentStatus,
   ThreadEnrichmentRow,
 } from "@/lib/operator-studio/wayseer/queries"
-import type { ThreadAnalysis } from "@/lib/operator-studio/wayseer/contracts/thread-analysis"
+import {
+  CONTRACT_VERSION as THREAD_ANALYSIS_CONTRACT_VERSION,
+  type ThreadAnalysis,
+} from "@/lib/operator-studio/wayseer/contracts/thread-analysis"
 
 import { useWayseer } from "./wayseer-context"
 
@@ -374,8 +377,17 @@ function PanelBody({
     )
   }
 
-  if (status === "completed" && enrichment?.resultPayload) {
-    return <CompletedAnalysis analysis={enrichment.resultPayload} enrichment={enrichment} />
+  if (
+    status === "completed" &&
+    enrichment?.resultPayload &&
+    enrichment.contractVersion === THREAD_ANALYSIS_CONTRACT_VERSION
+  ) {
+    return (
+      <CompletedAnalysis
+        analysis={enrichment.resultPayload as ThreadAnalysis}
+        enrichment={enrichment}
+      />
+    )
   }
 
   // Defensive: completed without a payload should never happen, but

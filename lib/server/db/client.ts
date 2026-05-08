@@ -11,7 +11,17 @@ const globalForDb = globalThis as typeof globalThis & {
 function getDatabaseUrl() {
   const value = process.env.DATABASE_URL?.trim()
   if (value) return value
-  throw new Error("DATABASE_URL is required for Operator Studio persistence.")
+  throw new Error(
+    [
+      "DATABASE_URL is required for Operator Studio persistence.",
+      "",
+      "Quick fix:",
+      "  cp .env.example .env.local",
+      "  # then edit .env.local and point DATABASE_URL at a Postgres you can write to",
+      "",
+      "If you don't have Postgres yet, see README.md → Quick start.",
+    ].join("\n")
+  )
 }
 
 export function getPgPool() {

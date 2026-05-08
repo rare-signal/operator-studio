@@ -127,6 +127,48 @@
       "when": 1777660000000,
       "tag": "0017_thread_done",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1777800000000,
+      "tag": "0018_beta_device_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1777860000000,
+      "tag": "0019_knowledge_base",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1777868000000,
+      "tag": "0020_promotion_labels",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1777960000000,
+      "tag": "0021_continuums",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1778000000000,
+      "tag": "0022_plan_step_trash",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1778060000000,
+      "tag": "0023_review_items",
+      "breakpoints": true
     }
   ]
 }

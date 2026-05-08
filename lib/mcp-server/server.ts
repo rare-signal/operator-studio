@@ -10,6 +10,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
+import { registerKnowledgeTools } from "./tools/knowledge.js"
 import { registerPlanTools } from "./tools/plan.js"
 import { registerRecapTools } from "./tools/recap.js"
 import { registerSessionTools } from "./tools/sessions.js"
@@ -33,6 +34,7 @@ export function buildOperatorStudioMcpServer(ctx: McpContext): McpServer {
   registerSessionTools(server, ctx)
   registerThreadTools(server, ctx)
   registerRecapTools(server, ctx)
+  registerKnowledgeTools(server, ctx)
 
   return server
 }

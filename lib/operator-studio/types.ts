@@ -307,6 +307,10 @@ export interface OperatorThreadPassage {
   textSnapshot: string
   textHash: string
   note: string | null
+  /** Optional FK to operator_promotion_labels.id. Null = highlighted
+   *  without a label (still a sacrosanct human elevation; the label
+   *  adds AI-readable context via the label's ai_context blurb). */
+  labelId: string | null
   promotedBy: string
   promotedAt: string // ISO
 }

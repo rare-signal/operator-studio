@@ -7,8 +7,18 @@ agent gets a small, opinionated read API instead of the firehose; you
 keep storing whatever you want in the database without worrying about
 context windows.
 
-The server runs as a separate stdio process, talks to the same Postgres
-the web app uses, and is read-only by design.
+The server runs as a separate stdio process and talks to the same
+Postgres the web app uses. Reads are the default; writes are scoped
+to plan steps and knowledge entries, where letting an agent mutate
+state cleanly removes the old "drop a tsx seed script in `scripts/`
+and ask the human to run it" workflow. Threads, sessions, and
+recaps remain read-only — those are agent inputs, not edit targets.
+
+Plan-step writes (`plan_step_upsert`, `plan_step_set_status`,
+`plan_step_delete`, `plan_step_restore`) all soft-delete via the
+`deleted_at` tombstone column added in migration 0022. Hard delete
+is not exposed; use the trash view (or a future purge step) to
+permanently remove rows.
 
 ---
 
@@ -66,7 +76,9 @@ For Codex, Cursor, or any other client, use the same `command` + `args`
 
 ---
 
-## The eight tools
+## The tools
+
+### Reads
 
 | Tool | Required | Optional | What it does |
 |---|---|---|---|
@@ -76,8 +88,20 @@ For Codex, Cursor, or any other client, use the same `command` + `args`
 | `plans_list` | — | `workspaceId` | Every plan in the workspace, sidebar order. |
 | `sessions_recent` | — | `limit`, `workspaceId` | Recent work sessions + the threads that touched them. |
 | `thread_summary` | `threadId` | `workspaceId` | Pre-computed summary (auto / manual / promoted). Cheap. |
+| `thread_context_pack` | — | `threadId`, `budgetTokens`, `workspaceId` | Pickup pack for a thread: metadata + all user turns when they fit, otherwise the most recent user turns with a truncation note. Omitting `threadId` uses the most recent visible thread. |
 | `thread_passages` | `threadId`, `query` | `limit`, `workspaceId` | Substring scan within one thread, returns matching turns with surrounding context. |
 | `progress_recap` | — | `window`, `since`, `until`, `compare`, `workspaceId` | "What got done in this window?" — sessions, promotions, plans shipped, steps newly evidenced, with delta vs prior window. |
+
+### Plan-step writes
+
+All deletes are soft (stamp `deleted_at`); recoverable via `plan_step_restore`.
+
+| Tool | Required | Optional | What it does |
+|---|---|---|---|
+| `plan_step_upsert` | `title` | `id`, `description`, `status`, `parentStepId`, `stepOrder`, `planId`, `workspaceId` | Insert or update a plan step. Omit `id` for a fresh append; provide `id` to update an existing step or seed a known id. |
+| `plan_step_set_status` | `stepId`, `status` | `planId`, `workspaceId` | Narrow shortcut for the most common edit (open / in-motion / covered / skipped). |
+| `plan_step_delete` | `stepId` | `cascade` (default true), `planId`, `workspaceId` | Soft-delete a step. Cascades to active descendants by default. |
+| `plan_step_restore` | `stepId` | `cascade` (default false), `planId`, `workspaceId` | Reverse of delete — clears `deleted_at`. |
 
 `workspaceId` overrides the default workspace (set by env or CLI flag);
 omit it and the configured default is used.
@@ -103,6 +127,7 @@ plan_search          required=['query'] optional=['limit', 'workspaceId']
 plans_list           required=[] optional=['workspaceId']
 sessions_recent      required=[] optional=['limit', 'workspaceId']
 thread_summary       required=['threadId'] optional=['workspaceId']
+thread_context_pack  required=[] optional=['threadId', 'budgetTokens', 'workspaceId']
 thread_passages      required=['threadId', 'query'] optional=['limit', 'workspaceId']
 progress_recap       required=[] optional=['window', 'since', 'until', 'compare', 'workspaceId']
 ```

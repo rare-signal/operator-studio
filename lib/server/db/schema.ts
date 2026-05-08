@@ -392,6 +392,10 @@ export const operatorPlanSteps = pgTable(
     coverImageUrl: text("cover_image_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    /** Soft-delete tombstone. Active steps are `deleted_at IS NULL`; trash
+     *  is the complement. Same pattern as operator_notes (migration 0015).
+     *  Existing read paths filter `IS NULL` by default. */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (t) => [
     index("idx_os_plan_steps_plan").on(t.planId, t.stepOrder),
@@ -442,6 +446,11 @@ export const operatorStepFulfillments = pgTable(
 // — exists independent of any plan step. Powers thread-reader highlights and
 // the "show all elevated passages" view; later, can be linked to a plan step
 // as a third evidence kind alongside thread + message.
+//
+// `labelId` (nullable FK to `operator_promotion_labels`) ties a passage to
+// an admin-configured promotion label. Null = "highlighted without a label"
+// (still useful as a sacrosanct human elevation; the label adds AI-readable
+// context via the label's ai_context blurb).
 export const operatorThreadPassages = pgTable(
   "operator_thread_passages",
   {
@@ -463,6 +472,7 @@ export const operatorThreadPassages = pgTable(
     textSnapshot: text("text_snapshot").notNull(),
     textHash: text("text_hash").notNull(),
     note: text("note"),
+    labelId: text("label_id"),
     promotedBy: text("promoted_by").notNull(),
     promotedAt: timestamp("promoted_at", { withTimezone: true }).notNull(),
   },
@@ -470,6 +480,43 @@ export const operatorThreadPassages = pgTable(
     index("idx_op_passages_thread").on(t.threadId, t.promotedAt),
     index("idx_op_passages_message").on(t.messageId),
     index("idx_op_passages_workspace").on(t.workspaceId),
+    index("idx_op_passages_label").on(t.labelId),
+  ]
+)
+
+// ─── Promotion labels (admin-configurable) ───────────────────────────
+//
+// Workspace-scoped, admin-managed set of named promotion flags. Each
+// label has a display name + an `aiContext` blurb that downstream
+// AI consumers (Wayseer prompts, KB generation) treat as the
+// definition of what the label means. Soft-deletable so retiring a
+// label doesn't orphan historical passages.
+export const operatorPromotionLabels = pgTable(
+  "operator_promotion_labels",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    /** "What does this label mean to the AI" blurb. Concatenated into
+     *  prompts that consume the labeled passage. */
+    aiContext: text("ai_context").notNull().default(""),
+    /** lucide-react icon name; falls back to a flame glyph. */
+    icon: text("icon"),
+    /** Tailwind color segment ("emerald", "amber", …). Free-form. */
+    color: text("color"),
+    sortIndex: integer("sort_index").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_op_promotion_labels_workspace").on(t.workspaceId),
+    index("idx_op_promotion_labels_workspace_sort").on(
+      t.workspaceId,
+      t.sortIndex
+    ),
   ]
 )
 
@@ -549,6 +596,364 @@ export const operatorThreadEnrichments = pgTable(
   ]
 )
 
+// ─── Beta phone surface device tokens + audit log ───────────────────────────
+//
+// Per-device bearer tokens for /api/beta/*. token_hash is sha256 of the
+// plaintext — plaintext is never stored. The CLI prints it once at mint.
+//
+// Env-var token (OPERATOR_STUDIO_BETA_TOKEN) stays valid as a "legacy-env"
+// identity for backwards compat — see app/api/beta/_device-tokens.ts.
+
+export const betaDeviceTokens = pgTable(
+  "beta_device_tokens",
+  {
+    id: text("id").primaryKey(),
+    tokenHash: text("token_hash").notNull().unique(),
+    deviceLabel: text("device_label").notNull(),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [index("idx_beta_device_tokens_token_hash").on(t.tokenHash)]
+)
+
+export const betaAuthLog = pgTable(
+  "beta_auth_log",
+  {
+    id: text("id").primaryKey(),
+    deviceId: text("device_id").references(() => betaDeviceTokens.id, {
+      onDelete: "set null",
+    }),
+    endpoint: text("endpoint").notNull(),
+    // ok | invalid | revoked | expired | missing | legacy-env
+    outcome: text("outcome").notNull(),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_beta_auth_log_device").on(t.deviceId, t.createdAt),
+    index("idx_beta_auth_log_created").on(t.createdAt),
+  ]
+)
+
+// ─── Per-workspace optional module flags ─────────────────────────────
+//
+// Generic enable-ment table. `module_key` is a stable identifier
+// ("knowledge_base" today; future modules attach without schema
+// changes). Surfaces and writers MUST gate on `enabled = 1` before
+// doing work — the KB is opt-in, not on-by-default.
+export const workspaceModules = pgTable(
+  "workspace_modules",
+  {
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    moduleKey: text("module_key").notNull(),
+    enabled: integer("enabled").notNull().default(0),
+    configJson: jsonb("config_json").$type<Record<string, unknown> | null>(),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }),
+    enabledBy: text("enabled_by"),
+  },
+  (t) => [
+    uniqueIndex("idx_workspace_modules_pk").on(t.workspaceId, t.moduleKey),
+    index("idx_workspace_modules_enabled").on(
+      t.workspaceId,
+      t.moduleKey,
+      t.enabled
+    ),
+  ]
+)
+
+// ─── Knowledge Base — entries (article layer) ─────────────────────────
+//
+// Encyclopedic markdown articles. Curated from claim clusters or
+// hand-written. Browseable surface modeled 1:1 on AIDA Observatory
+// intelligence/memory. Citations stay inline (jsonb) — one INSERT/
+// SELECT per write. Side table for cross-entry citation queries
+// can come later if it earns its place.
+export const operatorKbEntries = pgTable(
+  "operator_kb_entries",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    // concept | pattern | metric | procedure | agent | comparison |
+    // anomaly | todo | report
+    entryType: text("entry_type").notNull().default("concept"),
+    // evergreen | stable | fluctuant | draft
+    stability: text("stability").notNull().default("draft"),
+    title: text("title").notNull(),
+    summary: text("summary").notNull().default(""),
+    bodyMarkdown: text("body_markdown").notNull().default(""),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    relatedEntryIds: jsonb("related_entry_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    parentEntryId: text("parent_entry_id"),
+    sourceThreadId: text("source_thread_id").references(
+      () => operatorThreads.id,
+      { onDelete: "set null" }
+    ),
+    sourcePassageIds: jsonb("source_passage_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    /** Inline citations referenced from the body markdown. Each entry:
+     *  { kind: "passage"|"message"|"thread"|"claim",
+     *    threadId?, messageId?, passageId?, claimId?,
+     *    excerpt?: string, label?: string } */
+    citations: jsonb("citations")
+      .$type<KbCitation[]>()
+      .notNull()
+      .default([]),
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
+    refreshIntervalHours: integer("refresh_interval_hours"),
+    nextRefreshAt: timestamp("next_refresh_at", { withTimezone: true }),
+    lastUserEditAt: timestamp("last_user_edit_at", { withTimezone: true }),
+    lastUserEditBy: text("last_user_edit_by"),
+    modelProvider: text("model_provider"),
+    modelName: text("model_name"),
+    promptVersion: text("prompt_version"),
+    versionCount: integer("version_count").notNull().default(1),
+    metadata: jsonb("metadata")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_op_kb_entries_workspace").on(t.workspaceId),
+    index("idx_op_kb_entries_workspace_updated").on(
+      t.workspaceId,
+      t.updatedAt
+    ),
+    index("idx_op_kb_entries_workspace_type").on(t.workspaceId, t.entryType),
+    index("idx_op_kb_entries_workspace_stability").on(
+      t.workspaceId,
+      t.stability
+    ),
+    index("idx_op_kb_entries_parent").on(t.parentEntryId),
+  ]
+)
+
+// ─── Knowledge Base — claims (atomic-fact layer) ──────────────────────
+//
+// One claim = one proposition. Cheap for an LLM to produce from a
+// promoted passage; easy to supersede when newer evidence arrives.
+// Claims are what entries cite. Confidence is 0..1 from the model.
+// valid_at = when the claim was true (defaults to created_at).
+export const operatorKbClaims = pgTable(
+  "operator_kb_claims",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    statement: text("statement").notNull(),
+    /** Optional subject — the entity the claim is about (an agent,
+     *  a feature, a metric). Helps cluster claims for entry curation. */
+    subject: text("subject"),
+    confidence: doublePrecision("confidence").notNull().default(0.8),
+    sourceThreadId: text("source_thread_id").references(
+      () => operatorThreads.id,
+      { onDelete: "set null" }
+    ),
+    sourceMessageId: text("source_message_id").references(
+      () => operatorThreadMessages.id,
+      { onDelete: "set null" }
+    ),
+    sourcePassageId: text("source_passage_id").references(
+      () => operatorThreadPassages.id,
+      { onDelete: "set null" }
+    ),
+    sourceExcerpt: text("source_excerpt"),
+    validAt: timestamp("valid_at", { withTimezone: true }).notNull(),
+    /** When set, this claim was contradicted/replaced by another. The
+     *  pointer is to a sibling claim id in the same workspace. */
+    supersededById: text("superseded_by_id"),
+    /** Best-effort cache of entry ids that cite this claim. Rebuildable
+     *  by scanning entries.citations[].claim_id. */
+    citedByEntryIds: jsonb("cited_by_entry_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    modelProvider: text("model_provider"),
+    modelName: text("model_name"),
+    promptVersion: text("prompt_version"),
+    metadata: jsonb("metadata")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_op_kb_claims_workspace").on(t.workspaceId),
+    index("idx_op_kb_claims_workspace_valid").on(t.workspaceId, t.validAt),
+    index("idx_op_kb_claims_thread").on(t.sourceThreadId),
+    index("idx_op_kb_claims_passage").on(t.sourcePassageId),
+    index("idx_op_kb_claims_active").on(t.workspaceId, t.supersededById),
+  ]
+)
+
+/** Inline citation shape used in operator_kb_entries.citations[]. */
+export interface KbCitation {
+  kind: "passage" | "message" | "thread" | "claim"
+  threadId?: string
+  messageId?: string
+  passageId?: string
+  claimId?: string
+  excerpt?: string
+  label?: string
+}
+
+// ─── Continuum ─────────────────────────────────────────────────────────────
+//
+// A persisted handoff packet — see drizzle/0021_continuums.sql for the
+// rationale. The digest_json column stores a versioned shape; the v1
+// `ContinuumDigestV1` is defined in lib/operator-studio/continuum.ts so
+// the schema layer stays free of feature-specific shapes. JSONB here is
+// deliberate — it lets the heuristic and (eventual) LLM-drafted shapes
+// share storage without a migration.
+export const operatorContinuums = pgTable(
+  "operator_continuums",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /** Soft reference (no FK) — the Continuum row should survive thread
+     *  deletion as a frozen snapshot. */
+    sourceThreadId: text("source_thread_id").notNull(),
+    digestJson: jsonb("digest_json")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    resumePrompt: text("resume_prompt").notNull(),
+    /** draft | published | consumed */
+    status: text("status").notNull().default("draft"),
+    createdBy: text("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_op_continuums_workspace").on(t.workspaceId),
+    index("idx_op_continuums_source_thread").on(t.workspaceId, t.sourceThreadId),
+    index("idx_op_continuums_created_at").on(t.workspaceId, t.createdAt),
+  ]
+)
+
+// ─── David-only review bucket ─────────────────────────────────────────
+//
+// Interstitial layer between agent inference (or any upstream signal)
+// and team-visible surfaces. Raw conclusions land here as `david_only`
+// until promoted/edited/rejected/snoozed/imported. Generic across
+// lanes — TeleGento, Valikharlia, etc. surface as `source_type` values,
+// not bespoke tables.
+//
+// state machine:
+//   raw → summarized → candidate → (imported | promoted | rejected | snoozed)
+export const operatorReviewItems = pgTable(
+  "operator_review_items",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /** Free-form. Recommended: ado | teams | agent | known_issue |
+     *  product_narrative | deployment | signal_intake. */
+    sourceType: text("source_type").notNull(),
+    sourceLabel: text("source_label"),
+    /** Stable upstream identifier (work item id, message id, agent
+     *  run id, commit sha). Combined with sourceType for dedupe. */
+    sourceId: text("source_id"),
+    sourceUrl: text("source_url"),
+    title: text("title").notNull(),
+    summary: text("summary").notNull().default(""),
+    rawText: text("raw_text"),
+    rawPayload: jsonb("raw_payload").$type<Record<string, unknown> | null>(),
+    proposedAction: text("proposed_action"),
+    /** Soft reference. No FK so review items survive plan-step deletes. */
+    relatedPlanStepId: text("related_plan_step_id"),
+    /** david_only | promoted */
+    visibility: text("visibility").notNull().default("david_only"),
+    /** raw | summarized | candidate | imported | promoted | rejected | snoozed */
+    state: text("state").notNull().default("raw"),
+    confidence: doublePrecision("confidence"),
+    rationale: text("rationale"),
+    agentRunId: text("agent_run_id"),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    snoozedUntil: timestamp("snoozed_until", { withTimezone: true }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_op_review_items_workspace").on(t.workspaceId),
+    index("idx_op_review_items_workspace_state").on(t.workspaceId, t.state),
+    index("idx_op_review_items_workspace_source").on(
+      t.workspaceId,
+      t.sourceType,
+      t.sourceId
+    ),
+  ]
+)
+
+// ─── Thread → plan-card bindings ────────────────────────────────────────────
+//
+// Durable record of "this Claude/Codex/tmux worker is operating on this
+// plan card." Replaces the localStorage map that the Bento UI uses for
+// the same purpose so the binding survives across browsers and is
+// readable by server-side derivation (Operations desk, MCP tools, the
+// recent-activity API).
+//
+// One active binding per (workspaceId, agentId). Detached rows preserve
+// history; the unique index is partial on `detached_at IS NULL`.
+//
+// Soft FK to plan_step_id (no real FK) so a plan-step soft-delete
+// doesn't fail binding writes; readers should join carefully.
+export const operatorThreadCardBindings = pgTable(
+  "operator_thread_card_bindings",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /** Composite agent id, e.g. `claude:<uuid>`, `codex:rollout-…`. */
+    agentId: text("agent_id").notNull(),
+    /** claude | codex | tmux (free-form for forward-compat). */
+    agentKind: text("agent_kind").notNull(),
+    planStepId: text("plan_step_id").notNull(),
+    /** Denormalized — cheap lookups when the active plan changes rarely. */
+    planId: text("plan_id"),
+    /** launch | manual | tail-sniff | scheduled. */
+    source: text("source").notNull(),
+    confidence: doublePrecision("confidence"),
+    rationale: text("rationale"),
+    sourceRecommendationId: text("source_recommendation_id"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    /** Soft-detach. Keeps the historical link out of "current" reads. */
+    detachedAt: timestamp("detached_at", { withTimezone: true }),
+  },
+  // The migration also creates a partial unique index on
+  // (workspace_id, agent_id) WHERE detached_at IS NULL — drizzle's
+  // index DSL doesn't model partial uniques cleanly, so it lives in
+  // SQL only. Readers should treat (workspace_id, agent_id, detached_at)
+  // as the active-row key.
+  (t) => [
+    index("idx_op_thread_bindings_step").on(t.workspaceId, t.planStepId),
+    index("idx_op_thread_bindings_workspace").on(t.workspaceId),
+    index("idx_op_thread_bindings_agent").on(t.workspaceId, t.agentId),
+  ]
+)
+
 export const schema = {
   workspaces,
   operatorThreads,
@@ -566,4 +971,13 @@ export const schema = {
   operatorThreadEnrichments,
   apiTokens,
   webhookSubscriptions,
+  betaDeviceTokens,
+  betaAuthLog,
+  workspaceModules,
+  operatorKbEntries,
+  operatorKbClaims,
+  operatorPromotionLabels,
+  operatorContinuums,
+  operatorReviewItems,
+  operatorThreadCardBindings,
 }

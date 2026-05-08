@@ -87,6 +87,7 @@ export async function POST(
     messageId?: unknown
     text?: unknown
     note?: unknown
+    labelId?: unknown
   } | null
   if (!body || typeof body !== "object") {
     return NextResponse.json({ error: "Body required" }, { status: 400 })
@@ -96,6 +97,10 @@ export async function POST(
   const note =
     typeof body.note === "string" && body.note.trim().length > 0
       ? body.note.slice(0, MAX_NOTE)
+      : null
+  const labelId =
+    typeof body.labelId === "string" && body.labelId.length > 0
+      ? body.labelId
       : null
 
   if (!messageId || !text || text.trim().length === 0) {
@@ -168,6 +173,7 @@ export async function POST(
     textSnapshot: text,
     textHash: createHash("sha1").update(text).digest("hex"),
     note,
+    labelId,
     promotedBy,
   })
 

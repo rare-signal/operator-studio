@@ -338,12 +338,12 @@ function buildCounts(threads: OperatorThread[]): ThreadCountSummary {
 
 // ─── Pulse graph builder ────────────────────────────────────────────────────
 //
-// Mirrors the shape produced by `app/2/v2/data/load-pulse.ts::loadPulseGraph`
+// Mirrors the shape produced by `app/2/v2/data/load-work.ts::loadWorkGraph`
 // but builds it from the in-memory snapshot — no DB. Same field names,
-// same conventions (t in [0..1], pulseTicks capped, lane assignment via
-// greedy fit) so the live `PulseView` component renders unchanged.
+// same conventions (t in [0..1], activityTicks capped, lane assignment via
+// greedy fit) so the live `WorkView` component renders unchanged.
 
-interface ShowcasePulseNode {
+interface ShowcaseWorkNode {
   id: string
   title: string
   sourceApp: string
@@ -353,7 +353,7 @@ interface ShowcasePulseNode {
   messagesInWindow: number
   messagesTotal: number
   parentThreadId: string | null
-  pulseTicks: string[]
+  activityTicks: string[]
   tFirst: number
   tLast: number
   lane: number
@@ -405,7 +405,7 @@ function defaultSessionLabel(d: Date): string {
   })
 }
 
-function buildPulseGraph(
+function buildWorkGraph(
   session: OperatorSession,
   allSessions: OperatorSession[],
   threads: OperatorThread[],
@@ -420,7 +420,7 @@ function buildPulseGraph(
     Math.max(0, Math.min(1, (Date.parse(iso) - windowStart) / windowMs))
 
   // Threads whose messages overlap the session window.
-  const candidates: ShowcasePulseNode[] = []
+  const candidates: ShowcaseWorkNode[] = []
   let totalMessagesInWindow = 0
   for (const thread of threads) {
     const all = messagesByThread.get(thread.id) ?? []
@@ -442,11 +442,11 @@ function buildPulseGraph(
 
     const MAX_TICKS = 80
     const stride = Math.max(1, Math.ceil(inWindow.length / MAX_TICKS))
-    const pulseTicks: string[] = []
+    const activityTicks: string[] = []
     for (let i = 0; i < inWindow.length; i += stride) {
-      pulseTicks.push(inWindow[i].createdAt)
+      activityTicks.push(inWindow[i].createdAt)
     }
-    if (pulseTicks[pulseTicks.length - 1] !== lastAt) pulseTicks.push(lastAt)
+    if (activityTicks[activityTicks.length - 1] !== lastAt) activityTicks.push(lastAt)
 
     candidates.push({
       id: thread.id,
@@ -458,7 +458,7 @@ function buildPulseGraph(
       messagesInWindow: inWindow.length,
       messagesTotal: thread.messageCount,
       parentThreadId: thread.parentThreadId,
-      pulseTicks,
+      activityTicks,
       tFirst: t(firstAt),
       tLast: t(lastAt),
       lane: 0,
@@ -517,7 +517,7 @@ function buildPulseGraph(
   // Gap markers: idle stretches > 20 min between consecutive messages.
   const allTimes: number[] = []
   for (const n of nodes) {
-    for (const tick of n.pulseTicks) {
+    for (const tick of n.activityTicks) {
       const ms = Date.parse(tick)
       if (!Number.isNaN(ms)) allTimes.push(ms)
     }
@@ -874,13 +874,13 @@ function main(): void {
     .sort((a, b) => a.date.localeCompare(b.date))
   writeJson("daily-activity.json", dailyActivity)
 
-  // ── pulse-default.json + pulse-by-session/<id>.json ─────────────
-  // One pre-built PulseGraph per work session so the prev/next
+  // ── work-default.json + work-by-session/<id>.json ─────────────
+  // One pre-built WorkGraph per work session so the prev/next
   // navigation in the Work tab can pull a different graph without
-  // round-tripping the (non-existent) `/api/operator-studio/pulse`
-  // endpoint. `pulse-default.json` is a copy of the most-recent
+  // round-tripping the (non-existent) `/api/operator-studio/work`
+  // endpoint. `work-default.json` is a copy of the most-recent
   // session's graph — what loads on first paint.
-  console.log("→ building pulse graphs (one per session)...")
+  console.log("→ building work graphs (one per session)...")
   const sortedByEnd = [...workSessions]
     .filter((s) => s.messageCount > 0)
     .sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt))
@@ -888,25 +888,25 @@ function main(): void {
   let pulseSessionsWritten = 0
   for (const session of workSessions) {
     if (session.messageCount === 0) continue
-    const graph = buildPulseGraph(
+    const graph = buildWorkGraph(
       session,
       workSessions,
       threads,
       messagesByThread
     )
-    writeJson(`pulse-by-session/${session.id}.json`, graph)
+    writeJson(`work-by-session/${session.id}.json`, graph)
     pulseSessionsWritten++
   }
   if (defaultSession) {
-    const graph = buildPulseGraph(
+    const graph = buildWorkGraph(
       defaultSession,
       workSessions,
       threads,
       messagesByThread
     )
-    writeJson("pulse-default.json", graph)
+    writeJson("work-default.json", graph)
     console.log(
-      `  pulse default → ${defaultSession.id} (${(graph as { nodes: unknown[] }).nodes.length} threads); ${pulseSessionsWritten} per-session graphs written`
+      `  work default → ${defaultSession.id} (${(graph as { nodes: unknown[] }).nodes.length} threads); ${pulseSessionsWritten} per-session graphs written`
     )
   } else {
     console.log("  no sessions with content — skipping pulse graphs")

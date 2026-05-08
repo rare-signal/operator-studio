@@ -3,15 +3,15 @@ import { NextResponse, type NextRequest } from "next/server"
 import { authorizeRequest } from "@/lib/operator-studio/auth"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import {
-  loadPulseGraph,
-  getPulseFreshness,
+  loadWorkGraph,
+  getWorkFreshness,
   selectorFromQuery,
-} from "@/app/2/v2/data/load-pulse"
+} from "@/app/2/v2/data/load-work"
 
 export const dynamic = "force-dynamic"
 
 /**
- * GET /api/operator-studio/pulse
+ * GET /api/operator-studio/work
  *
  * Returns the Pulse graph for the active workspace as JSON. Hot path for
  * the client's live poll — way cheaper than `router.refresh()`, which
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
 
   // Fast-path: cheap freshness probe (MAX(created_at) on messages +
   // session bounds). If the client already has this version, 304.
-  const freshness = await getPulseFreshness(workspaceId, selector).catch(
+  const freshness = await getWorkFreshness(workspaceId, selector).catch(
     () => null
   )
 
@@ -69,7 +69,7 @@ export async function GET(req: NextRequest) {
   // window, so rapid consecutive builds hit the cache. The selector
   // (single id, range, or default) tracks whichever scope the
   // client is viewing.
-  const graph = await loadPulseGraph(workspaceId, selector).catch(() => null)
+  const graph = await loadWorkGraph(workspaceId, selector).catch(() => null)
 
   return NextResponse.json(
     {

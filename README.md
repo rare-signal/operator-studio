@@ -1,5 +1,7 @@
 # Operator Studio
 
+*A [Rare Signal](https://raresignal.ai) project.*
+
 A self-hostable workspace for reviewing, summarizing, and continuing agent coding sessions. Paste conversations from Claude Code, Codex, Cursor, Gemini, ChatGPT — or POST them from any script — and keep working with persistent, grounded context that doesn't evaporate when the tab closes.
 
 Built as the chat-to-org-memory layer your team already needed: one place every AI conversation can be reviewed, promoted, shared, and replayed.
@@ -12,9 +14,9 @@ Operator Studio is organized around a few durable primitives:
 
 - **Threads** are captured conversation artifacts from Codex, Claude Code, Cursor, ChatGPT, Gemini, webhooks, or manual paste.
 - **Messages** are individual turns inside captured threads or continuation chats. Promoted messages are user-approved **keepers**.
-- **Plans** are durable units of intent. A plan has ordered steps and can span many work sessions.
+- **Plans** are durable units of intent — ordered steps that can span many work sessions. The Plan + Work tab is the primary "watch progress happen" loop.
 - **Evidence** is a thread or message attached to a plan step to show that the step has been addressed.
-- **Work sessions** are time-bucketed bursts of activity used for briefs and timelines; they do not own plan intent.
+- **Work feed** is the live timeline of activity rolled up against your plan — agents post here as they touch threads, plans, and steps. Briefs and timelines read off the same stream.
 - **Continuation sessions** are interactive chats grounded in existing thread memory.
 
 See [`docs/domain-primitives.md`](./docs/domain-primitives.md) for the canonical vocabulary used by the code and product copy.
@@ -23,7 +25,7 @@ See [`docs/domain-primitives.md`](./docs/domain-primitives.md) for the canonical
 
 ### Capture
 - **Import from anywhere** — `POST /api/operator-studio/ingest` accepts Gemini, OpenAI, Anthropic, ChatGPT share exports, our native shape, JSONL, labeled transcripts (`User: ... Assistant: ...`), markdown with headings, or any raw blob. The universal parser autodetects format; nothing ever rejects.
-- **Local discovery** for Claude Code (`~/.claude/projects`) and Codex (`~/.codex/sessions`), with override paths.
+- **Local discovery** for any registered importer — Claude Code (`~/.claude/projects`), Codex (`~/.codex/sessions`), and OpenCode out of the box, with override paths and Mac/Windows/Linux defaults. Source apps are derived from a registry (`IMPORTER_SOURCE_IDS` / `listImporters()`), so adding a new one wires through the Discover UI without hard-coded lists scattered around.
 - **Dedupe** on ingest by content hash or caller-supplied `dedupeKey`, so pasting the same conversation twice returns the original thread.
 
 ### Review
@@ -31,6 +33,10 @@ See [`docs/domain-primitives.md`](./docs/domain-primitives.md) for the canonical
 - **Thread-level promotion** with a clean title, executive summary, why-it-matters line, tags, and project slug.
 - **Summary stack** per thread (auto, manual, promoted) so coverage grows as the thread gets referenced.
 - **Full-text search** across threads and messages — Postgres `tsvector` with weighted fields, `ts_headline` snippets highlighted with `<mark>`, sidebar input with 400ms debounce.
+
+### Plan
+- **Plan + Work tab** — durable plans on one side, live work feed on the other. The first-class "watch progress happen" surface: ordered plan steps on the left; agents posting evidence as they work on the right. Pick up a plan tomorrow exactly where you left it tonight.
+- **Evidence trail** — promote any thread or message onto a plan step. Steps accumulate references over time so the plan reads like a working journal, not a static checklist.
 
 ### Continue
 - **Forks** — branch a conversation without polluting the canonical thread; the fork carries the parent as frozen context.
@@ -198,6 +204,28 @@ Events fire for `thread.imported`, `thread.promoted`, `thread.archived`, and `me
 
 A zero-DB global hatch — `OPERATOR_STUDIO_PROMOTION_WEBHOOK_URL` + `_SECRET` — fires on every event across every workspace without needing an admin-UI row.
 
+## MCP server
+
+Operator Studio ships a local [Model Context Protocol](https://modelcontextprotocol.io) server that exposes plans, sessions, and threads to CLI agents — Claude Code, Codex, Cursor, anything that speaks MCP. The agent gets a small, opinionated read API instead of the firehose; you keep your full corpus in Postgres without blowing up its context window.
+
+```bash
+pnpm mcp:probe    # smoke-test in-process — calls every tool, prints what an agent would see
+pnpm mcp:server   # the real stdio server an MCP client spawns
+```
+
+Read-only by design, runs as a separate stdio process, and talks to the same Postgres the web app uses. Wiring details, tool reference, and Claude Code config snippets in [`lib/mcp-server/README.md`](./lib/mcp-server/README.md).
+
+## Wayseer CLI
+
+When you switch machines or pick up an agentic thread you started elsewhere, `wayseer` searches your captured threads + messages from the command line — a cross-platform context bridge for the moments where opening the web app would be more friction than it's worth.
+
+```bash
+pnpm wayseer:search "the thing I was working on"   # full-text search across threads + messages
+pnpm wayseer:plan                                  # list active plans and their next steps
+```
+
+Talks to a running Operator Studio instance over HTTP, so the same CLI works on macOS, Windows, and Linux against any reachable workbook.
+
 ## Tech stack
 
 - Next.js 16, React 19
@@ -215,3 +243,7 @@ Operator Studio is source-available under the [PolyForm Small Business License 1
 - **Commercial license required** for larger organizations. Email [me@davidlinclark.com](mailto:me@davidlinclark.com) — typical pricing is flat-rate annual per workspace; contact for a quote.
 
 This license is not OSI-approved "open source" — it is deliberately source-available with a small-business carve-out. The license text is lawyer-drafted and taken verbatim from [polyformproject.org](https://polyformproject.org/licenses/small-business/1.0.0). If you're over the threshold and want to use Operator Studio, talk to us — we want to make it easy.
+
+---
+
+Made by [Rare Signal](https://raresignal.ai).

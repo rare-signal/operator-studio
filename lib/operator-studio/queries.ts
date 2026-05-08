@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, isNotNull, lte, sql } from "drizzle-orm"
+import { and, asc, desc, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
 import {
@@ -3483,6 +3483,7 @@ function toPassage(
     textSnapshot: row.textSnapshot,
     textHash: row.textHash,
     note: row.note,
+    labelId: row.labelId ?? null,
     promotedBy: row.promotedBy,
     promotedAt: row.promotedAt.toISOString(),
   }
@@ -3503,6 +3504,7 @@ export async function createPassage(input: {
   textSnapshot: string
   textHash: string
   note: string | null
+  labelId?: string | null
   promotedBy: string
 }): Promise<OperatorThreadPassage> {
   const db = getDb()
@@ -3518,6 +3520,7 @@ export async function createPassage(input: {
       textSnapshot: input.textSnapshot,
       textHash: input.textHash,
       note: input.note,
+      labelId: input.labelId ?? null,
       promotedBy: input.promotedBy,
       promotedAt: new Date(),
     })
@@ -3929,7 +3932,8 @@ export async function getActivePlanCoverage(
     .where(
       and(
         eq(operatorPlanSteps.workspaceId, workspaceId),
-        eq(operatorPlanSteps.planId, planId)
+        eq(operatorPlanSteps.planId, planId),
+        isNull(operatorPlanSteps.deletedAt)
       )
     )
     .groupBy(operatorPlanSteps.status)
