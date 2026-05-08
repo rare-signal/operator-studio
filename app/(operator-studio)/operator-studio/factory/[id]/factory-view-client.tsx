@@ -1,0 +1,306 @@
+"use client"
+
+import * as React from "react"
+import Link from "next/link"
+
+import type { SoftwareFactory } from "@/lib/operator-studio/factories"
+import type { OutboxRow } from "@/lib/operator-studio/outbox"
+import type { InboxEvent } from "@/lib/operator-studio/inbox"
+
+interface Props {
+  factory: SoftwareFactory
+  contextHeader: string
+  awaitingOutbox: OutboxRow[]
+  recentOutbox: OutboxRow[]
+  recentInbox: InboxEvent[]
+}
+
+export function FactoryViewClient({
+  factory,
+  contextHeader,
+  awaitingOutbox,
+  recentOutbox,
+  recentInbox,
+}: Props) {
+  const [copied, setCopied] = React.useState(false)
+  function copyHeader() {
+    navigator.clipboard.writeText(contextHeader).then(
+      () => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      },
+      () => undefined
+    )
+  }
+
+  return (
+    <div className="mx-auto max-w-5xl px-5 py-6 space-y-6">
+      <header>
+        <p className="text-[10.5px] font-mono uppercase tracking-[0.18em] text-muted-foreground">
+          Software factory
+        </p>
+        <h1 className="mt-0.5 text-[20px] font-medium tracking-tight">
+          {factory.label}
+        </h1>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          {factory.orgName} · {factory.productName}
+          {factory.productProdUrl && (
+            <>
+              {" · "}
+              <a
+                href={factory.productProdUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                {factory.productProdUrl.replace(/^https?:\/\//, "")}
+              </a>
+            </>
+          )}
+        </p>
+      </header>
+
+      {/* Identity / system map */}
+      <section className="rounded-lg border bg-card">
+        <div className="border-b px-4 py-2 flex items-baseline justify-between gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            Factory identity
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            id <code className="font-mono">{factory.id}</code>
+          </span>
+        </div>
+        <dl className="grid grid-cols-[160px_1fr] gap-x-4 gap-y-1.5 px-4 py-3 text-[12px]">
+          <dt className="text-muted-foreground">Repo path</dt>
+          <dd className="font-mono break-all">
+            {factory.productRepoPath ?? "—"}
+          </dd>
+          <dt className="text-muted-foreground">Prod URL</dt>
+          <dd>
+            {factory.productProdUrl ? (
+              <a
+                href={factory.productProdUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline break-all"
+              >
+                {factory.productProdUrl}
+              </a>
+            ) : (
+              "—"
+            )}
+          </dd>
+          {factory.commsSubstrates.length > 0 && (
+            <>
+              <dt className="text-muted-foreground">Comms substrates</dt>
+              <dd className="space-y-1">
+                {factory.commsSubstrates.map((s, i) => (
+                  <div key={i} className="font-mono text-[11px]">
+                    <span className="text-foreground">{s.kind}</span>
+                    <span className="text-muted-foreground">
+                      {" — "}
+                      {Object.entries(s.details)
+                        .map(([k, v]) => `${k}=${String(v)}`)
+                        .join(", ")}
+                    </span>
+                  </div>
+                ))}
+              </dd>
+            </>
+          )}
+          {factory.audience.length > 0 && (
+            <>
+              <dt className="text-muted-foreground">Audience</dt>
+              <dd>
+                <ul className="space-y-1">
+                  {factory.audience.map((a, i) => (
+                    <li key={i}>
+                      <span className="font-medium">{a.name}</span>
+                      <span className="text-muted-foreground">
+                        {" — "}
+                        {a.role}
+                      </span>
+                      {a.identity && (
+                        <span className="ml-2 text-[11px] font-mono text-muted-foreground">
+                          {a.identity}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </dd>
+            </>
+          )}
+          {factory.operatorNotes && (
+            <>
+              <dt className="text-muted-foreground">Operator notes</dt>
+              <dd className="italic">{factory.operatorNotes}</dd>
+            </>
+          )}
+        </dl>
+      </section>
+
+      {/* Inbox */}
+      <section className="rounded-lg border bg-card">
+        <div className="border-b px-4 py-2 flex items-baseline justify-between">
+          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            Inbox · upstream events
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            {recentInbox.length} recent
+          </span>
+        </div>
+        {recentInbox.length === 0 ? (
+          <p className="px-4 py-4 text-[12px] text-muted-foreground">
+            No upstream events yet for this factory. ADO comments, state
+            transitions, Teams posts, and stakeholder requests will land
+            here when ingest is wired.
+          </p>
+        ) : (
+          <ul className="divide-y">
+            {recentInbox.map((ev) => (
+              <li key={ev.id} className="px-4 py-2.5">
+                <div className="flex items-baseline gap-2 text-[11px]">
+                  <span className="font-mono uppercase tracking-wider text-muted-foreground">
+                    {ev.surface} · {ev.upstreamKind}
+                  </span>
+                  {ev.actorName && (
+                    <span className="text-foreground">{ev.actorName}</span>
+                  )}
+                  <time
+                    className="ml-auto text-muted-foreground"
+                    title={ev.occurredAt}
+                  >
+                    {new Date(ev.occurredAt).toLocaleString()}
+                  </time>
+                </div>
+                {ev.textExcerpt && (
+                  <p className="mt-1 text-[12px] line-clamp-2 whitespace-pre-wrap">
+                    {ev.textExcerpt}
+                  </p>
+                )}
+                {ev.llmInitialLog && (
+                  <p className="mt-1 text-[11px] italic text-muted-foreground line-clamp-2">
+                    LLM read: {ev.llmInitialLog}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {/* Outbox — awaiting first */}
+      <section className="rounded-lg border bg-card">
+        <div className="border-b px-4 py-2 flex items-baseline justify-between">
+          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            Outbox · awaiting approval
+          </span>
+          <Link
+            href="/operator-studio/outbox"
+            className="text-[10px] text-muted-foreground hover:text-foreground"
+          >
+            All outbox →
+          </Link>
+        </div>
+        {awaitingOutbox.length === 0 ? (
+          <p className="px-4 py-4 text-[12px] text-muted-foreground">
+            Nothing awaiting your approval. The LLM stages outbound here;
+            you proofread + arm the gate before anything ships.
+          </p>
+        ) : (
+          <ul className="divide-y">
+            {awaitingOutbox.map((row) => (
+              <li key={row.id} className="px-4 py-2.5">
+                <Link
+                  href={`/operator-studio/outbox/${row.id}`}
+                  className="block hover:bg-muted/40 -mx-4 -my-2.5 px-4 py-2.5"
+                >
+                  <div className="flex items-baseline gap-2 text-[11px]">
+                    <span className="font-mono uppercase tracking-wider text-muted-foreground">
+                      {row.surface} · {row.action}
+                    </span>
+                    <span className="font-medium">
+                      {row.targetLabel ?? row.targetId}
+                    </span>
+                    <time
+                      className="ml-auto text-muted-foreground"
+                      title={row.proposedAt}
+                    >
+                      {new Date(row.proposedAt).toLocaleString()}
+                    </time>
+                  </div>
+                  <p className="mt-1 text-[12px] line-clamp-2 whitespace-pre-wrap">
+                    {row.renderedText}
+                  </p>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {recentOutbox.length > awaitingOutbox.length && (
+        <section className="rounded-lg border bg-card">
+          <div className="border-b px-4 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            Outbox · recent (any state)
+          </div>
+          <ul className="divide-y">
+            {recentOutbox
+              .filter((r) => r.state !== "awaiting_approval")
+              .slice(0, 10)
+              .map((row) => (
+                <li key={row.id} className="px-4 py-2.5">
+                  <Link
+                    href={`/operator-studio/outbox/${row.id}`}
+                    className="block hover:bg-muted/40 -mx-4 -my-2.5 px-4 py-2.5"
+                  >
+                    <div className="flex items-baseline gap-2 text-[11px]">
+                      <span className="font-mono uppercase tracking-wider text-muted-foreground">
+                        {row.surface} · {row.state}
+                      </span>
+                      <span className="font-medium">
+                        {row.targetLabel ?? row.targetId}
+                      </span>
+                      {row.sentAt && (
+                        <time
+                          className="ml-auto text-muted-foreground"
+                          title={row.sentAt}
+                        >
+                          {new Date(row.sentAt).toLocaleString()}
+                        </time>
+                      )}
+                    </div>
+                  </Link>
+                </li>
+              ))}
+          </ul>
+        </section>
+      )}
+
+      {/* Agent context bundle — copy-paste-able */}
+      <section className="rounded-lg border bg-card">
+        <div className="border-b px-4 py-2 flex items-baseline justify-between gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            Agent context bundle
+          </span>
+          <button
+            type="button"
+            onClick={copyHeader}
+            className="rounded border bg-background px-2 py-1 text-[11px] hover:bg-muted"
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+        <pre className="overflow-x-auto px-4 py-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+          {contextHeader}
+        </pre>
+        <p className="border-t px-4 py-2 text-[10.5px] text-muted-foreground">
+          Hand this header to a Claude/Codex worker at launch. The agent
+          receives an unambiguous repo / product / audience scope and the
+          outbound-via-outbox rule.
+        </p>
+      </section>
+    </div>
+  )
+}

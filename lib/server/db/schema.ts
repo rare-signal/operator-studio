@@ -1102,6 +1102,67 @@ export const operatorOutboxMessages = pgTable(
   ]
 )
 
+// ─── Inbox events — read-only mirror of upstream events ────────────────────
+//
+// Generic mirror of upstream-event ingestion (ADO comments / state
+// transitions, Teams posts, stakeholder feature requests, …). Per
+// `pattern-inbox-ingest` in the KB.
+//
+// Three permission tiers governing how the LLM may act on these rows
+// live in the tool / route layer (free read, confirm continuation,
+// hot-mode engineering, outbound-gated). The inbox itself is read-only
+// — no row here ever causes a side effect against an external system.
+export const operatorInboxEvents = pgTable(
+  "operator_inbox_events",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /** Soft FK to a software_factories row when scoped to one.  */
+    factoryId: text("factory_id"),
+    /** ado | teams | stakeholder_request | linear | atlassian_status | … */
+    surface: text("surface").notNull(),
+    /** Stable upstream identifier. With surface, used for dedupe via a
+     *  partial unique index (created in SQL). */
+    upstreamId: text("upstream_id"),
+    /** comment | state_transition | priority_change | assignment_change
+     *  | mention | feature_request | reply | post | … */
+    upstreamKind: text("upstream_kind").notNull(),
+    actorName: text("actor_name"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    payloadJson: jsonb("payload_json")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    textExcerpt: text("text_excerpt"),
+    relatedWorkId: text("related_work_id"),
+    relatedWorkLabel: text("related_work_label"),
+    ingestedAt: timestamp("ingested_at", { withTimezone: true }).notNull(),
+    /** LLM's first-pass read of this event. Bounded (≤1KB by
+     *  convention) and one-shot from the LLM side. */
+    llmInitialLog: text("llm_initial_log"),
+    llmInitialLogAt: timestamp("llm_initial_log_at", {
+      withTimezone: true,
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_op_inbox_workspace").on(t.workspaceId),
+    index("idx_op_inbox_workspace_factory_occurred").on(
+      t.workspaceId,
+      t.factoryId,
+      t.occurredAt
+    ),
+    index("idx_op_inbox_workspace_surface").on(
+      t.workspaceId,
+      t.surface,
+      t.occurredAt
+    ),
+  ]
+)
+
 export const schema = {
   workspaces,
   operatorThreads,
@@ -1130,4 +1191,5 @@ export const schema = {
   operatorThreadCardBindings,
   operatorOutboxMessages,
   softwareFactories,
+  operatorInboxEvents,
 }
