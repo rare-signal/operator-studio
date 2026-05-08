@@ -2531,7 +2531,15 @@ function TimelineMessage({
               />
             )}
             {msg.modelLabel && (
-              <div className="mt-1 text-[10px] opacity-50">via {msg.modelLabel}</div>
+              <div className="mt-1 text-[10px] opacity-50">
+                via {msg.modelLabel}
+                {msg.createdAt ? (
+                  <>
+                    {" · "}
+                    <RelativeTime iso={msg.createdAt} />
+                  </>
+                ) : null}
+              </div>
             )}
             {isPromoted && msg.promotionNote && (
               <div className="mt-1.5 pt-1.5 border-t border-amber-500/20 text-[10px] text-amber-600 dark:text-amber-400">
@@ -2577,6 +2585,12 @@ function TimelineMessage({
         {!isTranscript && !isUser && msg.modelLabel && (
           <span className="text-[10px] text-muted-foreground/40">
             via {msg.modelLabel}
+            {msg.createdAt ? (
+              <>
+                {" · "}
+                <RelativeTime iso={msg.createdAt} />
+              </>
+            ) : null}
           </span>
         )}
 
@@ -3412,4 +3426,48 @@ function CopyThreadMenu({
       </Dialog>
     </>
   )
+}
+
+/**
+ * Self-ticking relative-time label ("2m ago", "3h ago"). Pairs with the
+ * model name on assistant messages so the reader can see at a glance how
+ * recently the model spoke. Re-renders every 30s while mounted; mounts
+ * are cheap because the visible message count in any one thread view is
+ * bounded.
+ */
+function RelativeTime({ iso }: { iso: string }) {
+  const [, setTick] = React.useState(0)
+  React.useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 30_000)
+    return () => window.clearInterval(id)
+  }, [])
+  const label = formatMessageRelative(iso)
+  // `title` shows the absolute timestamp on hover for the rare case the
+  // operator wants the precise wall clock.
+  const absolute = (() => {
+    try {
+      return new Date(iso).toLocaleString()
+    } catch {
+      return iso
+    }
+  })()
+  return <span title={absolute}>{label}</span>
+}
+
+function formatMessageRelative(iso: string): string {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ""
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000))
+  if (seconds < 45) return "just now"
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days}d ago`
+  try {
+    return new Date(iso).toLocaleDateString()
+  } catch {
+    return iso
+  }
 }

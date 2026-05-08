@@ -17,6 +17,11 @@ export const viewport: Viewport = {
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
     { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
   ],
+  // Required for env(safe-area-inset-*) to be non-zero on iOS — without
+  // this, the focused mobile thread view's top rail (arm/disarm) and
+  // bottom composer (Send + Submit) get clipped under the notch / home
+  // indicator and become unacceptable for tapping.
+  viewportFit: "cover",
 }
 
 export default function RootLayout({
