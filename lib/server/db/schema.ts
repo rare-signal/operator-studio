@@ -351,6 +351,11 @@ export const operatorPlans = pgTable(
     createdBy: text("created_by").notNull(),
     shippedAt: timestamp("shipped_at", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
+    /** Soft FK to a `software_factories` row. Plans without a factory
+     *  belong to the implicit `factory-operator-studio` factory until
+     *  the F7 plan-merge-up sweep moves them. Per
+     *  `pattern-software-factory-context-air-gap`. */
+    factoryId: text("factory_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
@@ -358,7 +363,69 @@ export const operatorPlans = pgTable(
     index("idx_os_plans_workspace").on(t.workspaceId),
     index("idx_os_plans_workspace_state").on(t.workspaceId, t.state),
     index("idx_os_plans_workspace_pinned").on(t.workspaceId, t.pinned),
+    index("idx_os_plans_workspace_factory").on(t.workspaceId, t.factoryId),
   ]
+)
+
+// ─── Software Factories — per-org production system bindings ──────────────
+//
+// A Software Factory binds plans + agents + KB to:
+//   - a human team (org, named members, comms substrates),
+//   - a product (one or more repos, deploys, prod URL),
+//   - and an agentic loop scope (what the LLM watches, what it can write
+//     to, who outbound communications go through).
+//
+// The first factory is `factory-clarifying-telegento`; a second is
+// `factory-operator-studio` for meta-work on Operator Studio itself.
+// New factories are added by inserting rows here — no schema change.
+//
+// See `pattern-software-factory-context-air-gap` and
+// `kb-software-factory-doctrine` in the KB.
+export const softwareFactories = pgTable(
+  "software_factories",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /** Friendly title used in surfaces. */
+    label: text("label").notNull(),
+    orgName: text("org_name").notNull(),
+    productName: text("product_name").notNull(),
+    /** Absolute filesystem path to the product's primary repo on the
+     *  operator's machine. Handed to dispatched agents at launch as
+     *  the cwd they are allowed to edit. */
+    productRepoPath: text("product_repo_path"),
+    productProdUrl: text("product_prod_url"),
+    /** [{kind:'ado', org:'…', project:'…'}, {kind:'teams', …}, …] */
+    commsSubstrates: jsonb("comms_substrates")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    /** AWS arns, lambdas, repos, supporting URLs — anything an agent
+     *  needs to reason about the factory's runtime. Free-form jsonb.  */
+    systemMap: jsonb("system_map")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    /** Routing config for outbound — e.g. which Teams channel for
+     *  priority bumps, which ADO project for new work items. */
+    escalationTargets: jsonb("escalation_targets")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    /** Named stakeholders + their roles. Read-only audience members
+     *  appear here too. */
+    audience: jsonb("audience")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    /** Free-form notes the operator wants every agent to read. */
+    operatorNotes: text("operator_notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("idx_software_factories_workspace").on(t.workspaceId)]
 )
 
 export const operatorPlanSteps = pgTable(
@@ -954,6 +1021,87 @@ export const operatorThreadCardBindings = pgTable(
   ]
 )
 
+// ─── Outbox — staged outbound communications (gated send) ─────────────────
+//
+// Every outbound communication (ADO comment, Teams post, ADO state/priority
+// change, stakeholder reply, preview-deploy URL handoff, …) is staged here
+// as a row first. The Outbound PIN gate
+// (`lib/server/agent-bridge/outbound-mode.ts`) consumes a per-row,
+// payload-hash-bound approval at send time. Direct external writes that
+// bypass this row are considered a bug per
+// `pattern-outbound-pin-gate`.
+//
+// Lifecycle: draft → awaiting_approval → approved → sent
+//                                     → rejected
+//                                     → expired (armed window passed)
+export const operatorOutboxMessages = pgTable(
+  "operator_outbox_messages",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /** Soft FK to a software_factories row when F4 lands; nullable
+     *  until then. */
+    factoryId: text("factory_id"),
+    /** ado | teams | preview_deploy | email | stakeholder_reply | … */
+    surface: text("surface").notNull(),
+    /** Verb-noun pair, e.g. "ado.addComment", "teams.postMessage". */
+    action: text("action").notNull(),
+    /** Upstream identifier (ADO work-item id, Teams channel id, …). */
+    targetId: text("target_id").notNull(),
+    /** Human-readable target label, e.g. "ADO #39". */
+    targetLabel: text("target_label"),
+    /** Display-only audience list, e.g. ["Micky","Rob"]. Not used to
+     *  auto-mention — kept for the operator's situational awareness. */
+    audience: jsonb("audience").$type<string[]>().notNull().default([]),
+    /** The exact payload that will be passed to the outbound writer.
+     *  Hashed (canonical-JSON sha256) to bind to a per-row approval. */
+    payloadJson: jsonb("payload_json")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    /** Operator-facing rendered text — what David proofreads. May
+     *  diverge from payload_json.text after edit; the writer always
+     *  uses payload_json. */
+    renderedText: text("rendered_text").notNull(),
+    /** Null when LLM-authored; set when David edits. */
+    renderedTextEditedBy: text("rendered_text_edited_by"),
+    /** LLM-supplied "why this needs to go out". */
+    rationale: text("rationale"),
+    /** draft | awaiting_approval | approved | sent | rejected | expired */
+    state: text("state").notNull().default("draft"),
+    /** Provenance for audit. Free-form. */
+    llmRunId: text("llm_run_id"),
+    /** Inbox event ids that triggered this draft. */
+    sourceInboxEventIds: jsonb("source_inbox_event_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    relatedPlanStepId: text("related_plan_step_id"),
+    proposedAt: timestamp("proposed_at", { withTimezone: true }).notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    /** Recomputed and stored at send time. The gate compares this to
+     *  the hash bound at approval time. */
+    payloadHash: text("payload_hash"),
+    /** Writer response (e.g. {rev: 6, workItemUrl: "..."}). */
+    sendResult: jsonb("send_result").$type<Record<string, unknown> | null>(),
+    /** Set when the writer threw (gate rejection or upstream failure). */
+    sendError: text("send_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_op_outbox_workspace").on(t.workspaceId),
+    index("idx_op_outbox_workspace_state").on(t.workspaceId, t.state),
+    index("idx_op_outbox_workspace_surface_target").on(
+      t.workspaceId,
+      t.surface,
+      t.targetId
+    ),
+  ]
+)
+
 export const schema = {
   workspaces,
   operatorThreads,
@@ -980,4 +1128,6 @@ export const schema = {
   operatorContinuums,
   operatorReviewItems,
   operatorThreadCardBindings,
+  operatorOutboxMessages,
+  softwareFactories,
 }
