@@ -60,6 +60,8 @@ export function FactoryViewClient({
     itemsSeen: number
     rowsIngested: number
     rowsSkippedDuplicate: number
+    commentsIngested: number
+    commentsSkippedDuplicate: number
     error?: string
   }>(null)
 
@@ -89,6 +91,8 @@ export function FactoryViewClient({
           itemsSeen: 0,
           rowsIngested: 0,
           rowsSkippedDuplicate: 0,
+          commentsIngested: 0,
+          commentsSkippedDuplicate: 0,
           error: data?.error ?? "poll failed",
         })
       } else {
@@ -97,9 +101,12 @@ export function FactoryViewClient({
           itemsSeen: data.itemsSeen,
           rowsIngested: data.rowsIngested,
           rowsSkippedDuplicate: data.rowsSkippedDuplicate,
+          commentsIngested: data.commentsIngested ?? 0,
+          commentsSkippedDuplicate: data.commentsSkippedDuplicate ?? 0,
           error: data.errors?.[0],
         })
-        if (data.rowsIngested > 0) router.refresh()
+        if (data.rowsIngested > 0 || data.commentsIngested > 0)
+          router.refresh()
       }
     } catch (err) {
       setPollResult({
@@ -107,6 +114,8 @@ export function FactoryViewClient({
         itemsSeen: 0,
         rowsIngested: 0,
         rowsSkippedDuplicate: 0,
+        commentsIngested: 0,
+        commentsSkippedDuplicate: 0,
         error: err instanceof Error ? err.message : String(err),
       })
     } finally {
@@ -261,7 +270,7 @@ export function FactoryViewClient({
           >
             {pollResult.error
               ? `Poll error: ${pollResult.error}`
-              : `Polled at ${new Date(pollResult.finishedAt).toLocaleTimeString()} · seen=${pollResult.itemsSeen} · new=${pollResult.rowsIngested} · dedup=${pollResult.rowsSkippedDuplicate}`}
+              : `Polled at ${new Date(pollResult.finishedAt).toLocaleTimeString()} · seen=${pollResult.itemsSeen} · new=${pollResult.rowsIngested} · dedup=${pollResult.rowsSkippedDuplicate} · comments_new=${pollResult.commentsIngested} · comments_dedup=${pollResult.commentsSkippedDuplicate}`}
           </div>
         )}
         {recentInbox.length === 0 ? (

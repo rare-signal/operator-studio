@@ -11,6 +11,25 @@ const ORGANIZATION = "https://dev.azure.com/ClarifyingMarketingGroup"
 const PROJECT = "IT"
 
 /**
+ * ADO PAT for comment-body fetch. Optional — when unset, the poller
+ * still ingests work-item changes via the `az` CLI but skips
+ * comment ingestion. Mickey/Rob's comment text is the richest
+ * single signal in the inbox, so set this when you can.
+ *
+ * Scope: read-only on Work Items. Set in .env.local as ADO_PAT.
+ */
+function getAdoPat(): string | null {
+  const v = process.env.ADO_PAT?.trim()
+  return v && v.length > 0 ? v : null
+}
+
+function adoAuthHeader(pat: string): string {
+  // ADO PATs use basic auth with empty username.
+  const token = Buffer.from(`:${pat}`).toString("base64")
+  return `Basic ${token}`
+}
+
+/**
  * One-tick ADO poll for a factory.
  *
  * v1 scope:
@@ -35,6 +54,11 @@ export interface PollAdoResult {
   itemsSeen: number
   rowsIngested: number
   rowsSkippedDuplicate: number
+  /** Comments fetched + ingested across all items. Stays at 0 when
+   *  ADO_PAT is unset (graceful degrade — work-item changes still
+   *  flow). */
+  commentsIngested: number
+  commentsSkippedDuplicate: number
   errors: string[]
 }
 
@@ -47,6 +71,9 @@ export async function pollAdoForFactory(
   let itemsSeen = 0
   let rowsIngested = 0
   let rowsSkippedDuplicate = 0
+  let commentsIngested = 0
+  let commentsSkippedDuplicate = 0
+  const pat = getAdoPat()
 
   const wiql = [
     "SELECT",
@@ -98,6 +125,8 @@ export async function pollAdoForFactory(
       itemsSeen: 0,
       rowsIngested: 0,
       rowsSkippedDuplicate: 0,
+      commentsIngested: 0,
+      commentsSkippedDuplicate: 0,
       errors,
     }
   }
@@ -178,6 +207,82 @@ export async function pollAdoForFactory(
         `#${id} rev=${rev}: ${err instanceof Error ? err.message : String(err)}`
       )
     }
+
+    // Comment ingestion — gated on PAT being set. Each comment becomes
+    // its own inbox event keyed on `comment:<commentId>` so re-polls
+    // dedupe via the partial unique index. Best-effort: a single
+    // item's comment fetch failing does not abort the rest of the poll.
+    if (pat && Number.isFinite(id) && id > 0) {
+      try {
+        const r = await fetch(
+          `${ORGANIZATION}/${PROJECT}/_apis/wit/workItems/${id}/comments?api-version=7.1-preview.3`,
+          {
+            headers: {
+              Authorization: adoAuthHeader(pat),
+              Accept: "application/json",
+            },
+            // Don't auto-follow ADO's auth-redirect to login.live.com —
+            // we want a 302 to surface as a 302 so the auth-failure
+            // path is distinguishable from a real comment payload.
+            redirect: "manual",
+          }
+        )
+        const contentType = r.headers.get("content-type") ?? ""
+        if (!r.ok || !contentType.includes("application/json")) {
+          errors.push(
+            `#${id} comments fetch http=${r.status}${contentType ? ` (${contentType.split(";")[0]})` : ""} — ADO_PAT may be invalid or out of scope`
+          )
+        } else {
+          const data = (await r.json()) as AdoCommentsResponse
+          for (const c of data.comments ?? []) {
+            const commentId =
+              typeof c.id === "number" ? c.id : Number(c.id)
+            if (!Number.isFinite(commentId) || commentId <= 0) continue
+            const upstreamCommentId = `comment:${commentId}`
+            const before = await getInboxRowExists(
+              workspaceId,
+              "ado",
+              upstreamCommentId
+            )
+            const bodyHtml = typeof c.text === "string" ? c.text : ""
+            const bodyText = stripHtml(bodyHtml)
+            const occurredAt = c.createdDate
+              ? new Date(c.createdDate)
+              : new Date()
+            const author =
+              (c.createdBy && (c.createdBy.displayName as string)) ||
+              "(unknown)"
+            await ingestInboxEvent({
+              workspaceId,
+              factoryId,
+              surface: "ado",
+              upstreamId: upstreamCommentId,
+              upstreamKind: "comment",
+              actorName: author,
+              occurredAt,
+              payload: {
+                workItemId: id,
+                commentId,
+                bodyHtml,
+                bodyText,
+                createdBy: author,
+                createdDate: c.createdDate ?? null,
+                modifiedDate: c.modifiedDate ?? null,
+              },
+              textExcerpt: bodyText.slice(0, 500),
+              relatedWorkId: String(id),
+              relatedWorkLabel: `ADO #${id}`,
+            })
+            if (before) commentsSkippedDuplicate += 1
+            else commentsIngested += 1
+          }
+        }
+      } catch (err) {
+        errors.push(
+          `#${id} comments: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    }
   }
 
   return {
@@ -187,8 +292,33 @@ export async function pollAdoForFactory(
     itemsSeen,
     rowsIngested,
     rowsSkippedDuplicate,
+    commentsIngested,
+    commentsSkippedDuplicate,
     errors,
   }
+}
+
+interface AdoCommentsResponse {
+  comments?: Array<{
+    id?: number | string
+    text?: string
+    createdDate?: string
+    modifiedDate?: string
+    createdBy?: { displayName?: string; uniqueName?: string }
+  }>
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────

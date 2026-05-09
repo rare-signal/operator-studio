@@ -22,7 +22,12 @@ async function main() {
   )
   console.log(
     `  items_seen=${result.itemsSeen}  ingested=${result.rowsIngested}  ` +
-      `skipped_duplicate=${result.rowsSkippedDuplicate}  errors=${result.errors.length}`
+      `skipped_duplicate=${result.rowsSkippedDuplicate}`
+  )
+  console.log(
+    `  comments_ingested=${result.commentsIngested}  ` +
+      `comments_skipped_duplicate=${result.commentsSkippedDuplicate}  ` +
+      `errors=${result.errors.length}`
   )
   for (const e of result.errors) console.log(`  ! ${e}`)
   await getPgPool().end()
