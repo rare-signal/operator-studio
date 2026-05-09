@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
+import { buildAdoWorkItemUrl } from "@/lib/operator-studio/clients/ado-writer"
+
 import type { SignalCandidate } from "./types"
 
 const execFileAsync = promisify(execFile)
@@ -92,7 +94,7 @@ export async function getAzureDevopsSignals(): Promise<{
           body: `Azure DevOps item #${id} is ${state || "open"} in ${PROJECT}${assignedTo ? ` and assigned to ${assignedTo}` : ""}. Importing creates an Operator Studio task candidate while preserving the upstream work item link.`,
           priority: priorityFor(title, state),
           suggestedAction: "import-task",
-          externalUrl: `${ORGANIZATION}/${PROJECT}/_workitems/edit/${id}`,
+          externalUrl: buildAdoWorkItemUrl(id),
           sourceRef: {
             system: "azure-devops",
             teamOrProject: PROJECT,

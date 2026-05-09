@@ -11,6 +11,21 @@ import {
 const execFileAsync = promisify(execFile)
 
 const ORGANIZATION = "https://dev.azure.com/ClarifyingMarketingGroup"
+const PROJECT = "IT"
+
+/**
+ * Canonical work-item URL for Telegento's ADO.
+ *
+ * Working format (per David, 2026-05-08):
+ *   https://dev.azure.com/ClarifyingMarketingGroup/IT/_workitems/edit/39/
+ *
+ * Earlier paths missing the `/IT/` project segment 404 silently into
+ * ADO's chooser. Every code path that links into ADO MUST go through
+ * this helper.
+ */
+export function buildAdoWorkItemUrl(workItemId: number | string): string {
+  return `${ORGANIZATION}/${PROJECT}/_workitems/edit/${workItemId}/`
+}
 
 /**
  * Single typed entry point for outbound writes to Azure DevOps. Every
@@ -77,7 +92,7 @@ export async function addWorkItemComment(
   return {
     workItemId: parsed.id ?? intent.workItemId,
     rev: typeof parsed.rev === "number" ? parsed.rev : -1,
-    workItemUrl: `${ORGANIZATION}/_workitems/edit/${intent.workItemId}`,
+    workItemUrl: buildAdoWorkItemUrl(intent.workItemId),
   }
 }
 
