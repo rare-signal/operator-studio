@@ -11,10 +11,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
 import { registerKnowledgeTools } from "./tools/knowledge.js"
+import { registerOutboxTools } from "./tools/outbox.js"
 import { registerPlanTools } from "./tools/plan.js"
 import { registerRecapTools } from "./tools/recap.js"
 import { registerSessionTools } from "./tools/sessions.js"
 import { registerThreadTools } from "./tools/threads.js"
+import { registerWorkContextTools } from "./tools/work-context.js"
 import type { McpContext } from "./context.js"
 
 export function buildOperatorStudioMcpServer(ctx: McpContext): McpServer {
@@ -35,6 +37,8 @@ export function buildOperatorStudioMcpServer(ctx: McpContext): McpServer {
   registerThreadTools(server, ctx)
   registerRecapTools(server, ctx)
   registerKnowledgeTools(server, ctx)
+  registerWorkContextTools(server, ctx)
+  registerOutboxTools(server, ctx)
 
   return server
 }
