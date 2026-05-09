@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 
 import type { SoftwareFactory } from "@/lib/operator-studio/factories"
 import type { OutboxRow } from "@/lib/operator-studio/outbox"
@@ -22,7 +23,17 @@ export function FactoryViewClient({
   recentOutbox,
   recentInbox,
 }: Props) {
+  const router = useRouter()
   const [copied, setCopied] = React.useState(false)
+  const [polling, setPolling] = React.useState(false)
+  const [pollResult, setPollResult] = React.useState<null | {
+    finishedAt: string
+    itemsSeen: number
+    rowsIngested: number
+    rowsSkippedDuplicate: number
+    error?: string
+  }>(null)
+
   function copyHeader() {
     navigator.clipboard.writeText(contextHeader).then(
       () => {
@@ -32,6 +43,51 @@ export function FactoryViewClient({
       () => undefined
     )
   }
+
+  async function pollAdoNow() {
+    setPolling(true)
+    setPollResult(null)
+    try {
+      const r = await fetch("/api/operator-studio/ingest/ado", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ factoryId: factory.id }),
+      })
+      const data = await r.json()
+      if (!r.ok) {
+        setPollResult({
+          finishedAt: new Date().toISOString(),
+          itemsSeen: 0,
+          rowsIngested: 0,
+          rowsSkippedDuplicate: 0,
+          error: data?.error ?? "poll failed",
+        })
+      } else {
+        setPollResult({
+          finishedAt: data.pollFinishedAt,
+          itemsSeen: data.itemsSeen,
+          rowsIngested: data.rowsIngested,
+          rowsSkippedDuplicate: data.rowsSkippedDuplicate,
+          error: data.errors?.[0],
+        })
+        if (data.rowsIngested > 0) router.refresh()
+      }
+    } catch (err) {
+      setPollResult({
+        finishedAt: new Date().toISOString(),
+        itemsSeen: 0,
+        rowsIngested: 0,
+        rowsSkippedDuplicate: 0,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setPolling(false)
+    }
+  }
+
+  // Latest ado event timestamp = de-facto "last seen ADO change".
+  const lastAdoEvent =
+    recentInbox.find((e) => e.surface === "ado")?.occurredAt ?? null
 
   return (
     <div className="mx-auto max-w-5xl px-5 py-6 space-y-6">
@@ -142,14 +198,43 @@ export function FactoryViewClient({
 
       {/* Inbox */}
       <section className="rounded-lg border bg-card">
-        <div className="border-b px-4 py-2 flex items-baseline justify-between">
+        <div className="border-b px-4 py-2 flex flex-wrap items-baseline justify-between gap-2">
           <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Inbox · upstream events
           </span>
-          <span className="text-[10px] text-muted-foreground">
-            {recentInbox.length} recent
-          </span>
+          <div className="flex items-center gap-2 text-[10.5px]">
+            {lastAdoEvent && (
+              <span
+                className="text-muted-foreground"
+                title={lastAdoEvent}
+              >
+                last ADO event {new Date(lastAdoEvent).toLocaleString()}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={pollAdoNow}
+              disabled={polling}
+              className="rounded border bg-background px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-50"
+              title="Run an ADO poll now (read-only)"
+            >
+              {polling ? "Polling…" : "Poll ADO now"}
+            </button>
+          </div>
         </div>
+        {pollResult && (
+          <div
+            className={`border-b px-4 py-1.5 text-[11px] ${
+              pollResult.error
+                ? "bg-red-500/10 text-red-700 dark:text-red-400"
+                : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+            }`}
+          >
+            {pollResult.error
+              ? `Poll error: ${pollResult.error}`
+              : `Polled at ${new Date(pollResult.finishedAt).toLocaleTimeString()} · seen=${pollResult.itemsSeen} · new=${pollResult.rowsIngested} · dedup=${pollResult.rowsSkippedDuplicate}`}
+          </div>
+        )}
         {recentInbox.length === 0 ? (
           <p className="px-4 py-4 text-[12px] text-muted-foreground">
             No upstream events yet for this factory. ADO comments, state
