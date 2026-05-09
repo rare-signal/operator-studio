@@ -150,12 +150,15 @@ export async function getOutbox(
 
 export async function listOutbox(
   workspaceId: string,
-  opts?: { state?: OutboxState; limit?: number }
+  opts?: { state?: OutboxState; factoryId?: string; limit?: number }
 ): Promise<OutboxRow[]> {
   const db = getDb()
   const conditions = [eq(operatorOutboxMessages.workspaceId, workspaceId)]
   if (opts?.state) {
     conditions.push(eq(operatorOutboxMessages.state, opts.state))
+  }
+  if (opts?.factoryId) {
+    conditions.push(eq(operatorOutboxMessages.factoryId, opts.factoryId))
   }
   const rows = await db
     .select()

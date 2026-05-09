@@ -36,8 +36,12 @@ export default async function FactoryPage({
 
   const [awaitingOutbox, recentOutbox, recentInbox, planSteps] =
     await Promise.all([
-      listOutbox(workspaceId, { state: "awaiting_approval", limit: 20 }),
-      listOutbox(workspaceId, { limit: 20 }),
+      listOutbox(workspaceId, {
+        state: "awaiting_approval",
+        factoryId: id,
+        limit: 20,
+      }),
+      listOutbox(workspaceId, { factoryId: id, limit: 20 }),
       listInboxEvents(workspaceId, { factoryId: id, limit: 20 }),
       listFactoryPlanSteps(workspaceId, id, { limit: 200 }),
     ])

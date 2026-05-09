@@ -35,10 +35,15 @@ export async function GET(req: NextRequest) {
   const workspaceId = await getActiveWorkspaceId()
   const url = new URL(req.url)
   const stateParam = url.searchParams.get("state") ?? undefined
+  const factoryIdParam = url.searchParams.get("factoryId") ?? undefined
   const limit = Number(url.searchParams.get("limit") ?? 100) || 100
 
   const [items, counts] = await Promise.all([
-    listOutbox(workspaceId, { state: stateParam as OutboxState | undefined, limit }),
+    listOutbox(workspaceId, {
+      state: stateParam as OutboxState | undefined,
+      factoryId: factoryIdParam,
+      limit,
+    }),
     getOutboxCounts(workspaceId),
   ])
 
