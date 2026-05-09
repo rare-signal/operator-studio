@@ -1,9 +1,10 @@
 import "server-only"
 
-import { and, asc, desc, eq, isNull } from "drizzle-orm"
+import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
 import {
+  operatorPlans,
   operatorPlanSteps,
   softwareFactories,
 } from "@/lib/server/db/schema"
@@ -189,6 +190,12 @@ export async function listFactoryPlanSteps(
   opts?: { limit?: number }
 ): Promise<FactoryPlanStep[]> {
   const db = getDb()
+  // Resolution per pattern-software-factory-context-air-gap:
+  //   step.factory_id ?? plan.factory_id ?? null
+  // A step belongs to this factory when its own factory_id matches OR
+  // when the step's factory_id is NULL and the owning plan's
+  // factory_id matches. Done as a left-join so plans with no
+  // factory_id stay queryable without throwing the SQL into FULL.
   const rows = await db
     .select({
       id: operatorPlanSteps.id,
@@ -200,11 +207,18 @@ export async function listFactoryPlanSteps(
       updatedAt: operatorPlanSteps.updatedAt,
     })
     .from(operatorPlanSteps)
+    .leftJoin(operatorPlans, eq(operatorPlans.id, operatorPlanSteps.planId))
     .where(
       and(
         eq(operatorPlanSteps.workspaceId, workspaceId),
-        eq(operatorPlanSteps.factoryId, factoryId),
-        isNull(operatorPlanSteps.deletedAt)
+        isNull(operatorPlanSteps.deletedAt),
+        or(
+          eq(operatorPlanSteps.factoryId, factoryId),
+          and(
+            isNull(operatorPlanSteps.factoryId),
+            eq(operatorPlans.factoryId, factoryId)
+          )
+        )
       )
     )
     .orderBy(asc(operatorPlanSteps.status), desc(operatorPlanSteps.updatedAt))

@@ -238,7 +238,11 @@ export async function pollAdoForFactory(
             const commentId =
               typeof c.id === "number" ? c.id : Number(c.id)
             if (!Number.isFinite(commentId) || commentId <= 0) continue
-            const upstreamCommentId = `comment:${commentId}`
+            // ADO comment ids are scoped PER work item, so comment id 1
+            // on item #39 and comment id 1 on item #40 are different
+            // events. Including the work-item id in the upstream key
+            // prevents the partial unique index from collapsing them.
+            const upstreamCommentId = `${id}:comment:${commentId}`
             const before = await getInboxRowExists(
               workspaceId,
               "ado",
