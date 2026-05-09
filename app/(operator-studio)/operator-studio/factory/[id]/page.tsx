@@ -4,6 +4,7 @@ import { notFound } from "next/navigation"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import {
   getFactory,
+  listFactoryPlanSteps,
   renderFactoryContextHeader,
 } from "@/lib/operator-studio/factories"
 import { listOutbox } from "@/lib/operator-studio/outbox"
@@ -32,11 +33,13 @@ export default async function FactoryPage({
   const factory = await getFactory(workspaceId, id)
   if (!factory) return notFound()
 
-  const [awaitingOutbox, recentOutbox, recentInbox] = await Promise.all([
-    listOutbox(workspaceId, { state: "awaiting_approval", limit: 20 }),
-    listOutbox(workspaceId, { limit: 20 }),
-    listInboxEvents(workspaceId, { factoryId: id, limit: 20 }),
-  ])
+  const [awaitingOutbox, recentOutbox, recentInbox, planSteps] =
+    await Promise.all([
+      listOutbox(workspaceId, { state: "awaiting_approval", limit: 20 }),
+      listOutbox(workspaceId, { limit: 20 }),
+      listInboxEvents(workspaceId, { factoryId: id, limit: 20 }),
+      listFactoryPlanSteps(workspaceId, id, { limit: 200 }),
+    ])
 
   return (
     <FactoryViewClient
@@ -45,6 +48,7 @@ export default async function FactoryPage({
       awaitingOutbox={awaitingOutbox}
       recentOutbox={recentOutbox}
       recentInbox={recentInbox}
+      planSteps={planSteps}
     />
   )
 }

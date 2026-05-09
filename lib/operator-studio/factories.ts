@@ -1,9 +1,12 @@
 import "server-only"
 
-import { and, eq } from "drizzle-orm"
+import { and, asc, desc, eq, isNull } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
-import { softwareFactories } from "@/lib/server/db/schema"
+import {
+  operatorPlanSteps,
+  softwareFactories,
+} from "@/lib/server/db/schema"
 
 export interface CommsSubstrate {
   kind: "ado" | "teams" | "slack" | "linear" | "atlassian" | string
@@ -159,6 +162,62 @@ export async function upsertFactory(
   const fresh = await getFactory(input.workspaceId, input.id)
   if (!fresh) throw new Error(`upsertFactory: ${input.id} did not read back`)
   return fresh
+}
+
+export interface FactoryPlanStep {
+  id: string
+  planId: string
+  title: string
+  description: string | null
+  status: "open" | "in-motion" | "covered" | "skipped" | string
+  parentStepId: string | null
+  updatedAt: string
+}
+
+/**
+ * Plan steps tagged to this factory. Resolution: a step is included
+ * when its own `factory_id` equals the factory id (per-step bind), OR
+ * when its plan's `factory_id` equals the factory id (plan-level
+ * default). Soft-deleted steps are excluded.
+ *
+ * Ordered by status priority (in-motion → open → covered → skipped),
+ * then by most-recently-updated within each bucket.
+ */
+export async function listFactoryPlanSteps(
+  workspaceId: string,
+  factoryId: string,
+  opts?: { limit?: number }
+): Promise<FactoryPlanStep[]> {
+  const db = getDb()
+  const rows = await db
+    .select({
+      id: operatorPlanSteps.id,
+      planId: operatorPlanSteps.planId,
+      title: operatorPlanSteps.title,
+      description: operatorPlanSteps.description,
+      status: operatorPlanSteps.status,
+      parentStepId: operatorPlanSteps.parentStepId,
+      updatedAt: operatorPlanSteps.updatedAt,
+    })
+    .from(operatorPlanSteps)
+    .where(
+      and(
+        eq(operatorPlanSteps.workspaceId, workspaceId),
+        eq(operatorPlanSteps.factoryId, factoryId),
+        isNull(operatorPlanSteps.deletedAt)
+      )
+    )
+    .orderBy(asc(operatorPlanSteps.status), desc(operatorPlanSteps.updatedAt))
+    .limit(opts?.limit ?? 200)
+  return rows.map((r) => ({
+    id: r.id,
+    planId: r.planId,
+    title: r.title,
+    description: r.description ?? null,
+    status: r.status,
+    parentStepId: r.parentStepId ?? null,
+    updatedAt: r.updatedAt.toISOString(),
+  }))
 }
 
 /**

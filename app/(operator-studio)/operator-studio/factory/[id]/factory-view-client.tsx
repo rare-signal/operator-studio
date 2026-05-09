@@ -4,7 +4,10 @@ import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 
-import type { SoftwareFactory } from "@/lib/operator-studio/factories"
+import type {
+  FactoryPlanStep,
+  SoftwareFactory,
+} from "@/lib/operator-studio/factories"
 import type { OutboxRow } from "@/lib/operator-studio/outbox"
 import type { InboxEvent } from "@/lib/operator-studio/inbox"
 
@@ -14,6 +17,21 @@ interface Props {
   awaitingOutbox: OutboxRow[]
   recentOutbox: OutboxRow[]
   recentInbox: InboxEvent[]
+  planSteps: FactoryPlanStep[]
+}
+
+const STATUS_DOT: Record<string, string> = {
+  "in-motion": "bg-amber-500",
+  open: "bg-stone-400",
+  covered: "bg-emerald-500",
+  skipped: "bg-stone-300",
+}
+
+const STATUS_ORDER: Record<string, number> = {
+  "in-motion": 0,
+  open: 1,
+  covered: 2,
+  skipped: 3,
 }
 
 export function FactoryViewClient({
@@ -22,7 +40,18 @@ export function FactoryViewClient({
   awaitingOutbox,
   recentOutbox,
   recentInbox,
+  planSteps,
 }: Props) {
+  const stepCounts = planSteps.reduce<Record<string, number>>((acc, s) => {
+    acc[s.status] = (acc[s.status] ?? 0) + 1
+    return acc
+  }, {})
+  const sortedSteps = [...planSteps].sort((a, b) => {
+    const da = STATUS_ORDER[a.status] ?? 9
+    const db = STATUS_ORDER[b.status] ?? 9
+    if (da !== db) return da - db
+    return b.updatedAt.localeCompare(a.updatedAt)
+  })
   const router = useRouter()
   const [copied, setCopied] = React.useState(false)
   const [polling, setPolling] = React.useState(false)
@@ -271,6 +300,77 @@ export function FactoryViewClient({
                 )}
               </li>
             ))}
+          </ul>
+        )}
+      </section>
+
+      {/* Plan — steps tagged to this factory */}
+      <section className="rounded-lg border bg-card">
+        <div className="border-b px-4 py-2 flex flex-wrap items-baseline justify-between gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            Plan · steps tagged to this factory
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            {planSteps.length} total
+            {Object.entries(stepCounts).map(([s, n]) => (
+              <span key={s} className="ml-2">
+                {s}: {n}
+              </span>
+            ))}
+          </span>
+        </div>
+        {sortedSteps.length === 0 ? (
+          <p className="px-4 py-4 text-[12px] text-muted-foreground">
+            No plan steps tagged to this factory yet. Run{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+              scripts/backfill-plan-steps-factory.ts
+            </code>{" "}
+            to classify existing steps, or set <code className="text-[11px]">factoryId</code>{" "}
+            on new steps via{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+              upsertPlanStep
+            </code>
+            .
+          </p>
+        ) : (
+          <ul className="divide-y">
+            {sortedSteps.slice(0, 30).map((step) => (
+              <li key={step.id} className="px-4 py-2.5">
+                <Link
+                  href={`/operator-studio/plan?step=${encodeURIComponent(step.id)}`}
+                  className="block hover:bg-muted/40 -mx-4 -my-2.5 px-4 py-2.5"
+                >
+                  <div className="flex items-baseline gap-2">
+                    <span
+                      className={`size-1.5 shrink-0 rounded-full ${STATUS_DOT[step.status] ?? "bg-stone-400"}`}
+                      title={step.status}
+                    />
+                    <span className="text-[10.5px] font-mono uppercase tracking-wider text-muted-foreground">
+                      {step.status}
+                    </span>
+                    <span className="text-[12.5px] font-medium truncate">
+                      {step.title}
+                    </span>
+                    <time
+                      className="ml-auto text-[10px] text-muted-foreground"
+                      title={step.updatedAt}
+                    >
+                      {new Date(step.updatedAt).toLocaleDateString()}
+                    </time>
+                  </div>
+                  {step.description && (
+                    <p className="mt-1 text-[11.5px] text-foreground/80 line-clamp-2 whitespace-pre-wrap">
+                      {step.description}
+                    </p>
+                  )}
+                </Link>
+              </li>
+            ))}
+            {sortedSteps.length > 30 && (
+              <li className="px-4 py-2 text-[10.5px] text-muted-foreground">
+                + {sortedSteps.length - 30} more — view in /operator-studio/plan
+              </li>
+            )}
           </ul>
         )}
       </section>

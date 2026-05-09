@@ -457,6 +457,11 @@ export const operatorPlanSteps = pgTable(
     /** URL of an optional per-card cover image. Served by the studio
      *  uploads route handler at /api/operator-studio/uploads/step-covers/. */
     coverImageUrl: text("cover_image_url"),
+    /** Soft FK to a software_factories row. Per-step is preferred to
+     *  per-plan because the historical plan-valikharlia-agentic-studio-buildout
+     *  spans multiple factories' cards. Resolution order at read
+     *  sites: step.factoryId ?? plan.factoryId ?? null. */
+    factoryId: text("factory_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
     /** Soft-delete tombstone. Active steps are `deleted_at IS NULL`; trash
