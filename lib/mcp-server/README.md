@@ -78,6 +78,12 @@ For Codex, Cursor, or any other client, use the same `command` + `args`
 
 ## The tools
 
+### CALL THIS FIRST
+
+| Tool | Required | Optional | What it does |
+|---|---|---|---|
+| `agent_startup_manifest` | — | `factoryId`, `workspaceId` | The contract a fresh agent reads before any other tool. Returns the factory context bundle (repo / product / audience), the tools-first rules of engagement, the first-moves checklist, and the live recency packet. Idempotent. Read-only. |
+
 ### Reads
 
 | Tool | Required | Optional | What it does |
@@ -91,6 +97,20 @@ For Codex, Cursor, or any other client, use the same `command` + `args`
 | `thread_context_pack` | — | `threadId`, `budgetTokens`, `workspaceId` | Pickup pack for a thread: metadata + all user turns when they fit, otherwise the most recent user turns with a truncation note. Omitting `threadId` uses the most recent visible thread. |
 | `thread_passages` | `threadId`, `query` | `limit`, `workspaceId` | Substring scan within one thread, returns matching turns with surrounding context. |
 | `progress_recap` | — | `window`, `since`, `until`, `compare`, `workspaceId` | "What got done in this window?" — sessions, promotions, plans shipped, steps newly evidenced, with delta vs prior window. |
+| `knowledge_*` | varies | varies | Read & write KB entries + atomic claims. Use these instead of writing `.md` files for product-native records. |
+| `work_context_*` | — | varies | Active workspace context — current factory, plan, in-motion cards, bound agents, recent reviews. The `pnpm os:context` projection. |
+| `outbox_list` | — | `state`, `limit`, `workspaceId` | List staged outbound rows (default `awaiting_approval`) so an agent can see what is already pending operator approval. |
+
+### Outbound staging (gated send)
+
+Outbound communication NEVER goes out directly from a tool. The agent stages a row;
+the operator opens the per-row preview page, enters a PIN, and clicks Approve.
+The outbound writer's first line is `assertOutboundArmed()` — a per-row,
+payload-hash-bound, time-bounded check. There is no bypass.
+
+| Tool | Required | Optional | What it does |
+|---|---|---|---|
+| `outbox_stage_ado_comment` | `workItemId`, `text`, `rationale` | `audience`, `relatedPlanStepId`, `sourceInboxEventIds`, `factoryId`, `workspaceId` | Drafts a comment on an ADO work item. Persists state=`awaiting_approval` and surfaces the operator's preview URL in the response. Do NOT call `az boards` or any direct ADO API. |
 
 ### Plan-step writes
 
