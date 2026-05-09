@@ -10,6 +10,7 @@ import type {
 } from "@/lib/operator-studio/factories"
 import type { OutboxRow } from "@/lib/operator-studio/outbox"
 import type { InboxEvent } from "@/lib/operator-studio/inbox"
+import type { AdoSchedulerStatus } from "@/lib/operator-studio/ingest/ado-scheduler"
 
 interface Props {
   factory: SoftwareFactory
@@ -18,6 +19,7 @@ interface Props {
   recentOutbox: OutboxRow[]
   recentInbox: InboxEvent[]
   planSteps: FactoryPlanStep[]
+  schedulerStatus: AdoSchedulerStatus
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -41,6 +43,7 @@ export function FactoryViewClient({
   recentOutbox,
   recentInbox,
   planSteps,
+  schedulerStatus,
 }: Props) {
   const stepCounts = planSteps.reduce<Record<string, number>>((acc, s) => {
     acc[s.status] = (acc[s.status] ?? 0) + 1
@@ -241,6 +244,35 @@ export function FactoryViewClient({
             Inbox · upstream events
           </span>
           <div className="flex items-center gap-2 text-[10.5px]">
+            {schedulerStatus.enabled ? (
+              <span
+                className={`inline-flex items-center gap-1 ${
+                  schedulerStatus.running
+                    ? "text-emerald-700 dark:text-emerald-400"
+                    : "text-stone-500"
+                }`}
+                title={
+                  schedulerStatus.lastTickFinishedAt
+                    ? `last tick ${new Date(schedulerStatus.lastTickFinishedAt).toLocaleString()}`
+                    : "scheduler armed; first tick pending"
+                }
+              >
+                <span
+                  className={`size-1.5 rounded-full ${
+                    schedulerStatus.running ? "bg-emerald-500" : "bg-stone-400"
+                  }`}
+                />
+                auto every {Math.round(schedulerStatus.intervalMs / 1000)}s
+                {schedulerStatus.ticks > 0 && ` · ${schedulerStatus.ticks} ticks`}
+              </span>
+            ) : (
+              <span
+                className="text-muted-foreground"
+                title="set OPERATOR_STUDIO_ADO_AUTOPOLL=true to enable auto-poll"
+              >
+                auto-poll off
+              </span>
+            )}
             {lastAdoEvent && (
               <span
                 className="text-muted-foreground"

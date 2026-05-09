@@ -25,6 +25,22 @@ export async function register() {
   // (Edge) to avoid bundler errors on node-only modules.
   if (process.env.NEXT_RUNTIME !== "nodejs") return
 
+  // ADO background scheduler — opt-in via OPERATOR_STUDIO_ADO_AUTOPOLL.
+  // Best-effort + isolated from the watcher path: a scheduler failure
+  // never blocks watcher startup. See lib/operator-studio/ingest/ado-scheduler.ts.
+  try {
+    const { startAdoBackgroundPoller } = await import(
+      "./lib/operator-studio/ingest/ado-scheduler"
+    )
+    startAdoBackgroundPoller()
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[operator-studio] ADO background scheduler failed to start:",
+      err instanceof Error ? err.message : String(err)
+    )
+  }
+
   // Dynamic imports so Edge/browser bundlers don't see node:fs, pg, etc.
   const { isWatcherEnabled, startFileWatcher } = await import(
     "./lib/operator-studio/watcher"

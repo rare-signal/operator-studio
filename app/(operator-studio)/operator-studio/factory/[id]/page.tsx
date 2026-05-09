@@ -9,6 +9,7 @@ import {
 } from "@/lib/operator-studio/factories"
 import { listOutbox } from "@/lib/operator-studio/outbox"
 import { listInboxEvents } from "@/lib/operator-studio/inbox"
+import { getAdoSchedulerStatus } from "@/lib/operator-studio/ingest/ado-scheduler"
 
 import { FactoryViewClient } from "./factory-view-client"
 
@@ -49,6 +50,7 @@ export default async function FactoryPage({
       recentOutbox={recentOutbox}
       recentInbox={recentInbox}
       planSteps={planSteps}
+      schedulerStatus={getAdoSchedulerStatus()}
     />
   )
 }
