@@ -131,7 +131,7 @@ export function FactoryViewClient({
     recentInbox.find((e) => e.surface === "ado")?.occurredAt ?? null
 
   return (
-    <div className="mx-auto max-w-5xl px-5 py-6 space-y-6">
+    <div className="mx-auto max-w-5xl px-3 py-4 sm:px-5 sm:py-6 space-y-4 sm:space-y-6">
       <header>
         <p className="text-[10.5px] font-mono uppercase tracking-[0.18em] text-muted-foreground">
           Software factory
@@ -159,7 +159,7 @@ export function FactoryViewClient({
 
       {/* Identity / system map */}
       <section className="rounded-lg border bg-card">
-        <div className="border-b px-4 py-2 flex items-baseline justify-between gap-2">
+        <div className="border-b px-3 sm:px-4 py-2 flex items-baseline justify-between gap-2">
           <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Factory identity
           </span>
@@ -167,7 +167,7 @@ export function FactoryViewClient({
             id <code className="font-mono">{factory.id}</code>
           </span>
         </div>
-        <dl className="grid grid-cols-[160px_1fr] gap-x-4 gap-y-1.5 px-4 py-3 text-[12px]">
+        <dl className="grid grid-cols-[110px_1fr] sm:grid-cols-[160px_1fr] gap-x-3 sm:gap-x-4 gap-y-1.5 px-4 py-3 text-[12px]">
           <dt className="text-muted-foreground">Repo path</dt>
           <dd className="font-mono break-all">
             {factory.productRepoPath ?? "—"}
@@ -239,11 +239,11 @@ export function FactoryViewClient({
 
       {/* Inbox */}
       <section className="rounded-lg border bg-card">
-        <div className="border-b px-4 py-2 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="border-b px-3 sm:px-4 py-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
           <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Inbox · upstream events
           </span>
-          <div className="flex items-center gap-2 text-[10.5px]">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10.5px]">
             {schedulerStatus.enabled ? (
               <span
                 className={`inline-flex items-center gap-1 ${
@@ -306,7 +306,7 @@ export function FactoryViewClient({
           </div>
         )}
         {recentInbox.length === 0 ? (
-          <p className="px-4 py-4 text-[12px] text-muted-foreground">
+          <p className="px-3 sm:px-4 py-4 text-[12px] text-muted-foreground">
             No upstream events yet for this factory. ADO comments, state
             transitions, Teams posts, and stakeholder requests will land
             here when ingest is wired.
@@ -314,7 +314,7 @@ export function FactoryViewClient({
         ) : (
           <ul className="divide-y">
             {recentInbox.map((ev) => (
-              <li key={ev.id} className="px-4 py-2.5">
+              <li key={ev.id} className="px-3 sm:px-4 py-2.5">
                 <div className="flex items-baseline gap-2 text-[11px]">
                   <span className="font-mono uppercase tracking-wider text-muted-foreground">
                     {ev.surface} · {ev.upstreamKind}
@@ -347,7 +347,7 @@ export function FactoryViewClient({
 
       {/* Plan — steps tagged to this factory */}
       <section className="rounded-lg border bg-card">
-        <div className="border-b px-4 py-2 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="border-b px-3 sm:px-4 py-2 flex flex-wrap items-baseline justify-between gap-2">
           <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Plan · steps tagged to this factory
           </span>
@@ -361,7 +361,7 @@ export function FactoryViewClient({
           </span>
         </div>
         {sortedSteps.length === 0 ? (
-          <p className="px-4 py-4 text-[12px] text-muted-foreground">
+          <p className="px-3 sm:px-4 py-4 text-[12px] text-muted-foreground">
             No plan steps tagged to this factory yet. Run{" "}
             <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
               scripts/backfill-plan-steps-factory.ts
@@ -376,10 +376,10 @@ export function FactoryViewClient({
         ) : (
           <ul className="divide-y">
             {sortedSteps.slice(0, 30).map((step) => (
-              <li key={step.id} className="px-4 py-2.5">
+              <li key={step.id} className="px-3 sm:px-4 py-2.5">
                 <Link
                   href={`/operator-studio/plan?step=${encodeURIComponent(step.id)}`}
-                  className="block hover:bg-muted/40 -mx-4 -my-2.5 px-4 py-2.5"
+                  className="block hover:bg-muted/40 -mx-3 sm:-mx-4 -my-2.5 px-3 sm:px-4 py-2.5"
                 >
                   <div className="flex items-baseline gap-2">
                     <span
@@ -408,7 +408,7 @@ export function FactoryViewClient({
               </li>
             ))}
             {sortedSteps.length > 30 && (
-              <li className="px-4 py-2 text-[10.5px] text-muted-foreground">
+              <li className="px-3 sm:px-4 py-2 text-[10.5px] text-muted-foreground">
                 + {sortedSteps.length - 30} more — view in /operator-studio/plan
               </li>
             )}
@@ -418,7 +418,7 @@ export function FactoryViewClient({
 
       {/* Outbox — awaiting first */}
       <section className="rounded-lg border bg-card">
-        <div className="border-b px-4 py-2 flex items-baseline justify-between">
+        <div className="border-b px-3 sm:px-4 py-2 flex items-baseline justify-between">
           <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Outbox · awaiting approval
           </span>
@@ -430,17 +430,17 @@ export function FactoryViewClient({
           </Link>
         </div>
         {awaitingOutbox.length === 0 ? (
-          <p className="px-4 py-4 text-[12px] text-muted-foreground">
+          <p className="px-3 sm:px-4 py-4 text-[12px] text-muted-foreground">
             Nothing awaiting your approval. The LLM stages outbound here;
             you proofread + arm the gate before anything ships.
           </p>
         ) : (
           <ul className="divide-y">
             {awaitingOutbox.map((row) => (
-              <li key={row.id} className="px-4 py-2.5">
+              <li key={row.id} className="px-3 sm:px-4 py-2.5">
                 <Link
                   href={`/operator-studio/outbox/${row.id}`}
-                  className="block hover:bg-muted/40 -mx-4 -my-2.5 px-4 py-2.5"
+                  className="block hover:bg-muted/40 -mx-3 sm:-mx-4 -my-2.5 px-3 sm:px-4 py-2.5"
                 >
                   <div className="flex items-baseline gap-2 text-[11px]">
                     <span className="font-mono uppercase tracking-wider text-muted-foreground">
@@ -468,7 +468,7 @@ export function FactoryViewClient({
 
       {recentOutbox.length > awaitingOutbox.length && (
         <section className="rounded-lg border bg-card">
-          <div className="border-b px-4 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+          <div className="border-b px-3 sm:px-4 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Outbox · recent (any state)
           </div>
           <ul className="divide-y">
@@ -476,10 +476,10 @@ export function FactoryViewClient({
               .filter((r) => r.state !== "awaiting_approval")
               .slice(0, 10)
               .map((row) => (
-                <li key={row.id} className="px-4 py-2.5">
+                <li key={row.id} className="px-3 sm:px-4 py-2.5">
                   <Link
                     href={`/operator-studio/outbox/${row.id}`}
-                    className="block hover:bg-muted/40 -mx-4 -my-2.5 px-4 py-2.5"
+                    className="block hover:bg-muted/40 -mx-3 sm:-mx-4 -my-2.5 px-3 sm:px-4 py-2.5"
                   >
                     <div className="flex items-baseline gap-2 text-[11px]">
                       <span className="font-mono uppercase tracking-wider text-muted-foreground">
@@ -506,7 +506,7 @@ export function FactoryViewClient({
 
       {/* Agent context bundle — copy-paste-able */}
       <section className="rounded-lg border bg-card">
-        <div className="border-b px-4 py-2 flex items-baseline justify-between gap-2">
+        <div className="border-b px-3 sm:px-4 py-2 flex items-baseline justify-between gap-2">
           <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Agent context bundle
           </span>
@@ -518,10 +518,10 @@ export function FactoryViewClient({
             {copied ? "Copied" : "Copy"}
           </button>
         </div>
-        <pre className="overflow-x-auto px-4 py-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+        <pre className="overflow-x-auto px-3 sm:px-4 py-3 font-mono text-[10.5px] sm:text-[11px] leading-relaxed whitespace-pre-wrap break-words">
           {contextHeader}
         </pre>
-        <p className="border-t px-4 py-2 text-[10.5px] text-muted-foreground">
+        <p className="border-t px-3 sm:px-4 py-2 text-[10.5px] text-muted-foreground">
           Hand this header to a Claude/Codex worker at launch. The agent
           receives an unambiguous repo / product / audience scope and the
           outbound-via-outbox rule.
