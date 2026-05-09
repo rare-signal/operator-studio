@@ -133,9 +133,17 @@ export function FactoryViewClient({
   return (
     <div className="mx-auto max-w-5xl px-3 py-4 sm:px-5 sm:py-6 space-y-4 sm:space-y-6">
       <header>
-        <p className="text-[10.5px] font-mono uppercase tracking-[0.18em] text-muted-foreground">
-          Software factory
-        </p>
+        <div className="flex items-baseline justify-between gap-3">
+          <p className="text-[10.5px] font-mono uppercase tracking-[0.18em] text-muted-foreground">
+            Software factory
+          </p>
+          <Link
+            href={`/operator-studio/timeline?factory=${encodeURIComponent(factory.id)}`}
+            className="text-[10.5px] text-muted-foreground hover:text-foreground"
+          >
+            Timeline →
+          </Link>
+        </div>
         <h1 className="mt-0.5 text-[20px] font-medium tracking-tight">
           {factory.label}
         </h1>
