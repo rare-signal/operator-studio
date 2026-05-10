@@ -1035,6 +1035,22 @@ export const operatorThreadCardBindings = pgTable(
   ]
 )
 
+// ─── Cockpit exec — durable "this thread drives this workspace's lane" ───
+// One active exec per workspace. Server-side source of truth for the
+// role-conflict guard (a thread cannot simultaneously be exec and worker).
+export const operatorCockpitExecs = pgTable(
+  "operator_cockpit_execs",
+  {
+    workspaceId: text("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    agentId: text("agent_id").notNull(),
+    agentKind: text("agent_kind").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("idx_op_cockpit_execs_agent").on(t.agentId)]
+)
+
 // ─── Outbox — staged outbound communications (gated send) ─────────────────
 //
 // Every outbound communication (ADO comment, Teams post, ADO state/priority
@@ -1203,6 +1219,7 @@ export const schema = {
   operatorContinuums,
   operatorReviewItems,
   operatorThreadCardBindings,
+  operatorCockpitExecs,
   operatorOutboxMessages,
   softwareFactories,
   operatorInboxEvents,

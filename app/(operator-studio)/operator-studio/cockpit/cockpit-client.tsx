@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { ArrowLeft, ChevronDown, ChevronUp, Home, X } from "lucide-react"
+import { ArrowLeft, ChevronDown, ChevronUp, Home, Plus, X } from "lucide-react"
 
 import {
   BentoPane,
@@ -17,6 +17,8 @@ import type {
 } from "@/lib/server/agent-bridge/types"
 import type { AppStatus } from "@/lib/server/agent-bridge/app-sessions"
 
+type ReviewStatus = "live" | "ready-for-review" | "idle"
+
 interface SpawnedByWorker {
   agentId: string
   sequence: number
@@ -30,6 +32,13 @@ interface SpawnedByWorker {
   project: string | null
   title: string | null
   isLive: boolean
+  reviewStatus: ReviewStatus
+}
+
+const REVIEW_STATUS_RANK: Record<ReviewStatus, number> = {
+  "ready-for-review": 0,
+  live: 1,
+  idle: 2,
 }
 
 // ─── Cockpit lane view ────────────────────────────────────────────────────
@@ -178,29 +187,42 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
   )
   const spawnedWorkers = React.useMemo<AgentListItem[]>(() => {
     if (!execId) return []
-    return spawnedByWorkers
-      .filter((w) => w.active && w.agentId !== execId)
-      .map((w) => {
-        const kind: AgentKind =
-          w.source === "tmux" || w.source === "claude" || w.source === "codex"
-            ? w.source
-            : "claude"
-        return {
-          id: w.agentId as AgentCompositeId,
-          kind,
-          label: w.label ?? w.agentId.split(":").slice(1).join(":").slice(0, 8),
-          source: w.source,
-          lastActivityAt: w.lastActivityAt ?? w.spawnedAt,
-          status: w.status,
-          project: w.project,
-          title: w.title,
-          isLive: w.isLive,
-        }
-      })
+    const active = spawnedByWorkers.filter(
+      (w) => w.active && w.agentId !== execId
+    )
+    // Pin ready-for-review workers to the top, then live, then idle.
+    // Stable within each group via spawnedAt (server-sorted).
+    active.sort((a, b) => {
+      const r = REVIEW_STATUS_RANK[a.reviewStatus] - REVIEW_STATUS_RANK[b.reviewStatus]
+      if (r !== 0) return r
+      return a.spawnedAt.localeCompare(b.spawnedAt)
+    })
+    return active.map((w) => {
+      const kind: AgentKind =
+        w.source === "tmux" || w.source === "claude" || w.source === "codex"
+          ? w.source
+          : "claude"
+      return {
+        id: w.agentId as AgentCompositeId,
+        kind,
+        label: w.label ?? w.agentId.split(":").slice(1).join(":").slice(0, 8),
+        source: w.source,
+        lastActivityAt: w.lastActivityAt ?? w.spawnedAt,
+        status: w.status,
+        project: w.project,
+        title: w.title,
+        isLive: w.isLive,
+      }
+    })
   }, [spawnedByWorkers, execId])
   const workerSequenceByAgentId = React.useMemo(() => {
     const m = new Map<string, number>()
     for (const w of spawnedByWorkers) m.set(w.agentId, w.sequence)
+    return m
+  }, [spawnedByWorkers])
+  const reviewStatusByAgentId = React.useMemo(() => {
+    const m = new Map<string, ReviewStatus>()
+    for (const w of spawnedByWorkers) m.set(w.agentId, w.reviewStatus)
     return m
   }, [spawnedByWorkers])
   const worker = spawnedWorkers.find((a) => a.id === workerId) ?? null
@@ -264,6 +286,27 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
       }
     }
   }, [exec, spawnedWorkers, sound])
+
+  // ── Ready-for-review transition sound ─────────────────────────────
+  // Fire `thread_rest` when a worker flips INTO ready-for-review from
+  // any other state (live/idle). The first observation per worker is
+  // recorded WITHOUT firing — opening the cockpit with already-pending
+  // reviews shouldn't burst sound.
+  const seenReviewStatus = React.useRef<Map<string, ReviewStatus>>(new Map())
+  React.useEffect(() => {
+    for (const w of spawnedByWorkers) {
+      if (!w.active || w.agentId === execId) continue
+      const prev = seenReviewStatus.current.get(w.agentId)
+      if (prev === undefined) {
+        seenReviewStatus.current.set(w.agentId, w.reviewStatus)
+        continue
+      }
+      if (prev !== "ready-for-review" && w.reviewStatus === "ready-for-review") {
+        sound.fire("thread_rest", `ready-for-review:${w.agentId}:${w.lastActivityAt ?? w.spawnedAt}`)
+      }
+      seenReviewStatus.current.set(w.agentId, w.reviewStatus)
+    }
+  }, [spawnedByWorkers, execId, sound])
 
   // ── Hot-mode actions (mirror BentoView exactly) ──
   // The hot-mode endpoint is a single POST switched on `action` in the
@@ -354,6 +397,7 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
         onArm={arm}
         onDisarm={disarm}
         onExtend={extend}
+        onSetExec={pickExec}
       />
 
       <div className="flex-1 min-h-0 flex flex-col">
@@ -408,8 +452,8 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
               />
             </Pane>
           ) : (
-            <>
-              <Pane className="h-1/2 border-b border-stone-200 dark:border-stone-800">
+            <DraggableSplit
+              top={
                 <BentoPane
                   key={`exec:${exec.id}`}
                   agent={exec}
@@ -426,8 +470,8 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
                   isMaximized={false}
                   onToggleMaximize={() => setMaximizedAgentId(exec.id)}
                 />
-              </Pane>
-              <Pane className="h-1/2">
+              }
+              bottom={
                 <BentoPane
                   key={`worker:${worker.id}`}
                   agent={worker}
@@ -444,8 +488,8 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
                   isMaximized={false}
                   onToggleMaximize={() => setMaximizedAgentId(worker.id)}
                 />
-              </Pane>
-            </>
+              }
+            />
           )
         ) : spawnedWorkers.length === 0 ? (
           // STATE B — exec set, no spawned workers: exec fills screen.
@@ -492,6 +536,7 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
               <WorkersList
                 workers={spawnedWorkers}
                 workerSequenceByAgentId={workerSequenceByAgentId}
+                reviewStatusByAgentId={reviewStatusByAgentId}
                 onPick={(id) => setWorkerId(id)}
               />
             </Pane>
@@ -519,6 +564,7 @@ function TopRail({
   onArm,
   onDisarm,
   onExtend,
+  onSetExec,
 }: {
   exec: AgentListItem | null
   workerActive: boolean
@@ -530,6 +576,7 @@ function TopRail({
   onArm: (pin: string, durationMs?: number) => Promise<void>
   onDisarm: () => Promise<void> | void
   onExtend: (extraMs: number) => Promise<void>
+  onSetExec: (id: AgentCompositeId) => void
 }) {
   return (
     // Mirror the Bento focused-mobile rail exactly: `sticky top-0 z-30`.
@@ -572,14 +619,7 @@ function TopRail({
           )}
         </>
       ) : (
-        <>
-          <span className="text-[10px] uppercase tracking-wider text-stone-500">
-            Lane
-          </span>
-          <span className="text-[12px] font-medium text-stone-800 dark:text-stone-200 truncate">
-            Cockpit
-          </span>
-        </>
+        <LaneDropdown onSetExec={onSetExec} />
       )}
       {exec && !workerActive && (
         <button
@@ -665,10 +705,12 @@ function PickList({
 function WorkersList({
   workers,
   workerSequenceByAgentId,
+  reviewStatusByAgentId,
   onPick,
 }: {
   workers: AgentListItem[]
   workerSequenceByAgentId: Map<string, number>
+  reviewStatusByAgentId?: Map<string, ReviewStatus>
   onPick: (id: AgentCompositeId) => void
 }) {
   return (
@@ -682,6 +724,7 @@ function WorkersList({
             key={a.id}
             agent={a}
             workerSequence={workerSequenceByAgentId.get(a.id) ?? null}
+            reviewStatus={reviewStatusByAgentId?.get(a.id) ?? null}
             onPick={onPick}
           />
         ))}
@@ -693,24 +736,41 @@ function WorkersList({
 function AgentRow({
   agent,
   workerSequence,
+  reviewStatus,
   onPick,
 }: {
   agent: AgentListItem
   workerSequence?: number | null
+  reviewStatus?: ReviewStatus | null
   onPick: (id: AgentCompositeId) => void
 }) {
+  const isReady = reviewStatus === "ready-for-review"
+  const isIdle = reviewStatus === "idle"
+  // Distinct visual treatment per reviewStatus:
+  //   ready-for-review → bright amber highlight band + pill
+  //   live             → existing pulsing dot behavior
+  //   idle             → muted dot + dim row
+  const rowBg = isReady
+    ? "bg-amber-50 dark:bg-amber-950/40 ring-1 ring-amber-300 dark:ring-amber-700"
+    : ""
+  const dotClass = isReady
+    ? "bg-amber-500"
+    : isIdle
+    ? "bg-stone-300 dark:bg-stone-600"
+    : agent.isLive
+    ? "bg-emerald-500 animate-pulse"
+    : "bg-stone-400"
+  const titleDim = isIdle ? "text-stone-500 dark:text-stone-500" : "text-stone-900 dark:text-stone-100"
   return (
     <li>
       <button
         type="button"
         onClick={() => onPick(agent.id)}
-        className="w-full text-left px-3 py-2.5 active:bg-stone-100 dark:active:bg-stone-800"
+        className={`w-full text-left px-3 py-2.5 active:bg-stone-100 dark:active:bg-stone-800 ${rowBg}`}
       >
         <div className="flex items-center gap-2">
           <span
-            className={`inline-block h-1.5 w-1.5 rounded-full ${
-              agent.isLive ? "bg-emerald-500 animate-pulse" : "bg-stone-400"
-            }`}
+            className={`inline-block h-1.5 w-1.5 rounded-full ${dotClass}`}
             aria-hidden
           />
           <span
@@ -722,11 +782,16 @@ function AgentRow({
               ? ` · Worker ${workerSequence}`
               : ""}
           </span>
+          {isReady && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/60 text-[9.5px] font-semibold uppercase tracking-wider text-amber-900 dark:text-amber-200">
+              ✓ awaiting your review
+            </span>
+          )}
           <span className="ml-auto text-[10px] text-stone-500">
             {formatRelative(agent.lastActivityAt)}
           </span>
         </div>
-        <div className="mt-0.5 text-[12.5px] font-medium text-stone-900 dark:text-stone-100 line-clamp-2">
+        <div className={`mt-0.5 text-[12.5px] font-medium line-clamp-2 ${titleDim}`}>
           {agent.title ?? agent.label}
         </div>
         {agent.project && (
@@ -736,6 +801,395 @@ function AgentRow({
         )}
       </button>
     </li>
+  )
+}
+
+// ─── Draggable splitter (cockpit lane management MVP) ─────────────────────
+//
+// Vertical drag handle between exec (top) and worker (bottom). Persists
+// the ratio to localStorage and resets to 50/50 on double-tap. Min/max
+// 15%/85% per side.
+
+const SPLIT_RATIO_KEY = "operator-studio:cockpit:split-ratio"
+const SPLIT_MIN = 0.15
+const SPLIT_MAX = 0.85
+const SPLIT_DEFAULT = 0.5
+
+function clampRatio(r: number): number {
+  if (!Number.isFinite(r)) return SPLIT_DEFAULT
+  return Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, r))
+}
+
+function useSplitRatio(): [number, (r: number) => void, () => void] {
+  const [ratio, setRatioState] = React.useState<number>(SPLIT_DEFAULT)
+  React.useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SPLIT_RATIO_KEY)
+      if (raw) {
+        const n = Number(raw)
+        if (Number.isFinite(n)) setRatioState(clampRatio(n))
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+  const setRatio = React.useCallback((r: number) => {
+    const next = clampRatio(r)
+    setRatioState(next)
+    try {
+      window.localStorage.setItem(SPLIT_RATIO_KEY, String(next))
+    } catch {
+      /* ignore */
+    }
+  }, [])
+  const reset = React.useCallback(() => setRatio(SPLIT_DEFAULT), [setRatio])
+  return [ratio, setRatio, reset]
+}
+
+function DraggableSplit({
+  top,
+  bottom,
+}: {
+  top: React.ReactNode
+  bottom: React.ReactNode
+}) {
+  const [ratio, setRatio, reset] = useSplitRatio()
+  const containerRef = React.useRef<HTMLDivElement | null>(null)
+  const draggingRef = React.useRef(false)
+  const lastTapRef = React.useRef<number>(0)
+
+  const onPointerDown = React.useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    ;(e.target as Element).setPointerCapture?.(e.pointerId)
+    draggingRef.current = true
+  }, [])
+
+  const onPointerMove = React.useCallback(
+    (e: React.PointerEvent) => {
+      if (!draggingRef.current) return
+      const el = containerRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      if (rect.height <= 0) return
+      const next = (e.clientY - rect.top) / rect.height
+      setRatio(next)
+    },
+    [setRatio]
+  )
+
+  const onPointerUp = React.useCallback((e: React.PointerEvent) => {
+    draggingRef.current = false
+    ;(e.target as Element).releasePointerCapture?.(e.pointerId)
+  }, [])
+
+  const onClick = React.useCallback(() => {
+    const now = Date.now()
+    if (now - lastTapRef.current < 350) {
+      reset()
+      lastTapRef.current = 0
+    } else {
+      lastTapRef.current = now
+    }
+  }, [reset])
+
+  const topGrow = ratio
+  const bottomGrow = 1 - ratio
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex-1 min-h-0 flex flex-col"
+      style={{ touchAction: "none" }}
+    >
+      <section
+        className="relative flex flex-col overflow-hidden min-h-0"
+        style={{ flexGrow: topGrow, flexShrink: 1, flexBasis: 0 }}
+      >
+        {top}
+      </section>
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize split"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onDoubleClick={reset}
+        onClick={onClick}
+        className="relative h-3 shrink-0 cursor-row-resize bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 active:bg-stone-300 dark:active:bg-stone-600 border-y border-stone-200 dark:border-stone-700 select-none"
+        title="Drag to resize. Double-tap to reset."
+      >
+        <span
+          aria-hidden
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-0.5 w-8 rounded-full bg-stone-400 dark:bg-stone-500"
+        />
+      </div>
+      <section
+        className="relative flex flex-col overflow-hidden min-h-0"
+        style={{ flexGrow: bottomGrow, flexShrink: 1, flexBasis: 0 }}
+      >
+        {bottom}
+      </section>
+    </div>
+  )
+}
+
+// ─── Lane dropdown (workspace + exec picker) ──────────────────────────────
+
+interface ThreadCandidate {
+  id: string
+  label: string
+  source: string
+  title: string | null
+  project: string | null
+  isLive: boolean
+  roleStatus: "exec" | "worker" | "available"
+  lastActivityAt: string
+}
+
+function LaneDropdown({
+  onSetExec,
+}: {
+  onSetExec: (agentId: AgentCompositeId) => void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [workspaces, setWorkspaces] = React.useState<
+    Array<{ id: string; label: string; createdAt: string }>
+  >([])
+  const [activeWorkspaceId, setActiveWorkspaceId] = React.useState<string>("global")
+  const [threads, setThreads] = React.useState<ThreadCandidate[]>([])
+  const [error, setError] = React.useState<string | null>(null)
+  const [busy, setBusy] = React.useState(false)
+  const popoverRef = React.useRef<HTMLDivElement | null>(null)
+
+  React.useEffect(() => {
+    if (!open) return
+    let alive = true
+    async function load() {
+      try {
+        const wsRes = await fetch("/api/workspaces", { cache: "no-store" })
+        const wsData = (await wsRes.json().catch(() => ({}))) as {
+          workspaces?: Array<{ id: string; label: string; createdAt: string }>
+        }
+        if (alive && Array.isArray(wsData.workspaces)) {
+          setWorkspaces(wsData.workspaces)
+        }
+
+        const tRes = await fetch(
+          `/api/operator-studio/cockpit/threads?workspaceId=${encodeURIComponent(
+            activeWorkspaceId
+          )}&appLimit=20`,
+          { cache: "no-store" }
+        )
+        const tData = (await tRes.json().catch(() => ({}))) as {
+          threads?: ThreadCandidate[]
+        }
+        if (alive && Array.isArray(tData.threads)) {
+          setThreads(tData.threads)
+        }
+      } catch (e) {
+        if (alive)
+          setError(e instanceof Error ? e.message : "load failed")
+      }
+    }
+    load()
+    return () => {
+      alive = false
+    }
+  }, [open, activeWorkspaceId])
+
+  // Close on outside click.
+  React.useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      if (!popoverRef.current) return
+      if (!popoverRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener("mousedown", onDocClick)
+    return () => window.removeEventListener("mousedown", onDocClick)
+  }, [open])
+
+  async function createWorkspace() {
+    const label = window.prompt("New workspace name:")?.trim()
+    if (!label) return
+    const id = label
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+    if (!id) return
+    setBusy(true)
+    try {
+      const r = await fetch("/api/workspaces", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, label }),
+      })
+      const data = (await r.json().catch(() => ({}))) as {
+        workspace?: { id: string; label: string; createdAt: string }
+        error?: string
+      }
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`)
+      if (data.workspace) {
+        setWorkspaces((prev) => [...prev, data.workspace!])
+        setActiveWorkspaceId(data.workspace.id)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "create failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function pickExec(t: ThreadCandidate) {
+    if (t.roleStatus !== "available" && t.roleStatus !== "exec") return
+    setBusy(true)
+    try {
+      const r = await fetch("/api/operator-studio/cockpit/exec", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: activeWorkspaceId,
+          agentId: t.id,
+          agentKind: t.source,
+        }),
+      })
+      const data = (await r.json().catch(() => ({}))) as { error?: string }
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`)
+      onSetExec(t.id as AgentCompositeId)
+      setOpen(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "set-exec failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="relative" ref={popoverRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded text-[12px] font-semibold text-stone-800 dark:text-stone-100 hover:bg-stone-100 dark:hover:bg-stone-800"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Switch workspace or executive thread"
+      >
+        <span className="text-[10px] uppercase tracking-wider text-stone-500">
+          Lane
+        </span>
+        <span className="ml-1">Cockpit</span>
+        <ChevronDown className="h-3 w-3 ml-0.5 text-stone-400" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute left-0 top-full mt-1 z-40 w-80 max-h-[70vh] overflow-y-auto rounded-md border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 shadow-lg"
+        >
+          {error && (
+            <div className="m-2 p-2 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-[11px] text-red-700 dark:text-red-300">
+              {error}
+            </div>
+          )}
+
+          <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-stone-500">
+            Workspace
+          </div>
+          <ul className="divide-y divide-stone-100 dark:divide-stone-800">
+            {workspaces.map((w) => (
+              <li key={w.id}>
+                <button
+                  type="button"
+                  onClick={() => setActiveWorkspaceId(w.id)}
+                  className={`w-full text-left px-3 py-1.5 text-[12px] hover:bg-stone-50 dark:hover:bg-stone-800 ${
+                    w.id === activeWorkspaceId
+                      ? "bg-stone-100 dark:bg-stone-800 font-semibold"
+                      : ""
+                  }`}
+                >
+                  {w.label}
+                  <span className="ml-1 text-[10px] text-stone-400">
+                    {w.id}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={createWorkspace}
+            className="w-full text-left px-3 py-1.5 text-[12px] text-stone-600 dark:text-stone-300 hover:bg-stone-50 dark:hover:bg-stone-800 inline-flex items-center gap-1"
+          >
+            <Plus className="h-3 w-3" /> Create new workspace
+          </button>
+
+          <div className="border-t border-stone-200 dark:border-stone-800 mt-1" />
+
+          <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-stone-500">
+            Executive thread
+          </div>
+          {threads.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-stone-500">
+              No candidates yet.
+            </div>
+          ) : (
+            <ul className="divide-y divide-stone-100 dark:divide-stone-800">
+              {threads.slice(0, 12).map((t) => {
+                const disabled = t.roleStatus === "worker"
+                return (
+                  <li key={t.id}>
+                    <button
+                      type="button"
+                      disabled={disabled || busy}
+                      onClick={() => pickExec(t)}
+                      title={
+                        disabled
+                          ? "currently a worker for an active plan card"
+                          : t.roleStatus === "exec"
+                            ? "already this lane's exec"
+                            : "Set as exec"
+                      }
+                      className={`w-full text-left px-3 py-1.5 text-[12px] ${
+                        disabled
+                          ? "opacity-40 cursor-not-allowed"
+                          : "hover:bg-stone-50 dark:hover:bg-stone-800"
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`inline-block h-1.5 w-1.5 rounded-full ${
+                            t.isLive ? "bg-emerald-500" : "bg-stone-400"
+                          }`}
+                          aria-hidden
+                        />
+                        <span className="text-[10px] uppercase tracking-wider text-stone-500">
+                          {t.source}
+                        </span>
+                        {t.roleStatus !== "available" && (
+                          <span
+                            className={`text-[9px] uppercase tracking-wider rounded px-1 ${
+                              t.roleStatus === "exec"
+                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200"
+                                : "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200"
+                            }`}
+                          >
+                            {t.roleStatus}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 truncate">
+                        {t.title ?? t.label}
+                      </div>
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -21,7 +21,10 @@ import "server-only"
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
-import { operatorThreadCardBindings } from "@/lib/server/db/schema"
+import {
+  operatorCockpitExecs,
+  operatorThreadCardBindings,
+} from "@/lib/server/db/schema"
 
 export type ThreadBindingSource =
   | "launch"
@@ -114,6 +117,24 @@ export async function upsertThreadCardBinding(
 ): Promise<ThreadCardBinding> {
   const db = getDb()
   const now = new Date()
+
+  // Role-conflict guard: a thread that's currently a cockpit exec
+  // cannot be bound as a worker. Roles are mutually exclusive.
+  const execRow = await db
+    .select({ workspaceId: operatorCockpitExecs.workspaceId })
+    .from(operatorCockpitExecs)
+    .where(
+      and(
+        eq(operatorCockpitExecs.workspaceId, input.workspaceId),
+        eq(operatorCockpitExecs.agentId, input.agentId)
+      )
+    )
+    .limit(1)
+  if (execRow.length > 0) {
+    throw new Error(
+      `Thread ${input.agentId} is currently the cockpit exec for workspace ${input.workspaceId}; clear the exec before binding it as a worker.`
+    )
+  }
 
   const existing = await db
     .select()
