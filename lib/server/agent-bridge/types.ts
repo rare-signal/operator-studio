@@ -48,6 +48,15 @@ export interface AgentSnapshot {
   turns?: Turn[]
   fileMtime?: string
   pendingBytes?: number
+  /** Count of turns dropped from the FRONT of the parsed tail before
+   *  the response was built. The server slices `turns` so it starts at
+   *  the user's most recent message — `turns[0].role === "user"` by
+   *  construction (when any user turn exists in the tail). `earlierTurnsHidden`
+   *  is the number of older turns the slice cut off, so the UI can later
+   *  surface a "load earlier" affordance. 0 when no slicing happened
+   *  (fresh session with no user turn yet, or every parsed turn is the
+   *  user's last+after). Absent on tmux captures. */
+  earlierTurnsHidden?: number
   liveness?: {
     partialMode:
       | "tmux-pane-text"

@@ -72,12 +72,31 @@ export async function GET(
   if ("error" in tail) {
     return NextResponse.json({ error: tail.error }, { status: tail.status })
   }
+  // Slice the tail forward from the user's most recent turn so the
+  // cockpit's executive thread always opens AT David's last sent
+  // message. The AI's reply naturally appears below it as the browser
+  // renders top-down — no scroll-anchor math required client-side.
+  // Doing the slice server-side means every consumer (focused-pane,
+  // main-cockpit exec, future panes) gets the right shape for free.
+  // When the tail has no user turn yet (fresh session), nothing is
+  // sliced and the UI just renders whatever's there.
+  let lastUserIdx = -1
+  for (let i = tail.turns.length - 1; i >= 0; i--) {
+    if (tail.turns[i].role === "user") {
+      lastUserIdx = i
+      break
+    }
+  }
+  const sliceFrom = lastUserIdx >= 0 ? lastUserIdx : 0
+  const slicedTurns = tail.turns.slice(sliceFrom)
+
   const snapshot: AgentSnapshot = {
     id: `${parsed.kind}:${parsed.ref}` as AgentSnapshot["id"],
     kind: parsed.kind,
     capturedAt: new Date().toISOString(),
     status: tail.status,
-    turns: tail.turns,
+    turns: slicedTurns,
+    earlierTurnsHidden: sliceFrom,
     fileMtime: tail.fileMtime,
     pendingBytes: tail.pendingBytes,
   }
