@@ -1,6 +1,12 @@
 /**
  * GET  /api/operator-studio/work-lanes?workspaceId=<id>&includeArchived=1
- *   → { lanes: WorkLane[] }
+ *   → { lanes: EnrichedWorkLane[] }
+ *
+ * Each lane includes per-lane at-a-glance metadata so the cockpit's
+ * entry picker can render without follow-up fetches:
+ *   exec: { agentId, agentKind, label, lastActivityAt, isLive } | null
+ *   liveWorkerCount: number
+ *   readyForReviewCount: number  (berthier-reviewed && !human-approved)
  *
  * POST /api/operator-studio/work-lanes
  *   body: { workspaceId, name, description?, execAgentId?, execAgentKind? }
@@ -12,6 +18,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { authorizeRequest } from "@/lib/operator-studio/auth"
 import {
   createWorkLane,
+  enrichWorkLanes,
   listWorkLanes,
   LaneExecConflictError,
 } from "@/lib/operator-studio/work-lanes"
@@ -31,7 +38,8 @@ export async function GET(req: NextRequest) {
   const includeArchived =
     req.nextUrl.searchParams.get("includeArchived") === "1"
   const lanes = await listWorkLanes(workspaceId, { includeArchived })
-  return NextResponse.json({ lanes })
+  const enriched = await enrichWorkLanes(lanes)
+  return NextResponse.json({ lanes: enriched })
 }
 
 export async function POST(req: NextRequest) {

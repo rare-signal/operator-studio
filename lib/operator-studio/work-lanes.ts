@@ -1,14 +1,20 @@
 import "server-only"
 
-import { and, asc, eq, isNull } from "drizzle-orm"
+import { and, asc, eq, isNotNull, isNull } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
 import {
+  operatorThreadCardBindings,
   operatorWorkLanes,
   operatorWorkLaneMembership,
 } from "@/lib/server/db/schema"
 import { getThreadRoleStatus } from "./cockpit-execs"
 import { getActiveBindingsForAgents } from "./thread-card-bindings"
+import {
+  getAppSessionEntry,
+  type AppSlug,
+} from "@/lib/server/agent-bridge/app-sessions"
+import { parseAgentId } from "@/lib/server/agent-bridge/types"
 
 export type LaneMemberKind = "plan_step" | "kb_entry"
 
@@ -97,6 +103,112 @@ export async function getWorkLane(id: string): Promise<WorkLane | null> {
     .where(eq(operatorWorkLanes.id, id))
     .limit(1)
   return rows.length > 0 ? rowToLane(rows[0]) : null
+}
+
+export interface EnrichedWorkLaneExec {
+  agentId: string
+  agentKind: string
+  label: string | null
+  lastActivityAt: string | null
+  isLive: boolean
+}
+
+export interface EnrichedWorkLane extends WorkLane {
+  exec: EnrichedWorkLaneExec | null
+  /** Active worker bindings spawned by this lane's exec. */
+  liveWorkerCount: number
+  /** Active bindings with berthier_reviewed_at set but human_approved_at
+   *  not yet stamped — these are the workers awaiting David's eyes. */
+  readyForReviewCount: number
+}
+
+/**
+ * Enrich a set of lanes with per-lane at-a-glance metadata for the
+ * cockpit entry picker:
+ *   - exec label + last activity + liveness (resolved from JSONL on
+ *     disk, best-effort; null if the exec session can't be located)
+ *   - live worker count = active bindings spawned by this lane's exec
+ *   - ready-for-review count = subset that are berthier-reviewed but
+ *     not yet human-approved
+ *
+ * Lanes with no exec set return zeroed counts and a null exec entry.
+ */
+export async function enrichWorkLanes(
+  lanes: WorkLane[]
+): Promise<EnrichedWorkLane[]> {
+  if (lanes.length === 0) return []
+  const db = getDb()
+  const execAgentIds = lanes
+    .map((l) => l.execAgentId)
+    .filter((id): id is string => !!id)
+
+  // Count active + ready-for-review bindings per spawned_by agent in one query.
+  const counts = new Map<
+    string,
+    { live: number; ready: number }
+  >()
+  if (execAgentIds.length > 0) {
+    const rows = await db
+      .select({
+        spawnedByAgentId: operatorThreadCardBindings.spawnedByAgentId,
+        berthierReviewedAt: operatorThreadCardBindings.berthierReviewedAt,
+        humanApprovedAt: operatorThreadCardBindings.humanApprovedAt,
+      })
+      .from(operatorThreadCardBindings)
+      .where(
+        and(
+          isNull(operatorThreadCardBindings.detachedAt),
+          isNotNull(operatorThreadCardBindings.spawnedByAgentId)
+        )
+      )
+    for (const r of rows) {
+      const exec = r.spawnedByAgentId
+      if (!exec || !execAgentIds.includes(exec)) continue
+      const c = counts.get(exec) ?? { live: 0, ready: 0 }
+      c.live += 1
+      if (r.berthierReviewedAt && !r.humanApprovedAt) c.ready += 1
+      counts.set(exec, c)
+    }
+  }
+
+  return Promise.all(
+    lanes.map(async (lane) => {
+      let exec: EnrichedWorkLaneExec | null = null
+      if (lane.execAgentId) {
+        const parsed = parseAgentId(lane.execAgentId)
+        if (parsed.kind === "claude" || parsed.kind === "codex") {
+          const app: AppSlug = parsed.kind
+          const entry = await getAppSessionEntry(app, parsed.ref).catch(
+            () => null
+          )
+          exec = {
+            agentId: lane.execAgentId,
+            agentKind: lane.execAgentKind ?? parsed.kind,
+            label: entry?.title?.slice(0, 60) ?? null,
+            lastActivityAt: entry
+              ? new Date(entry.mtimeMs).toISOString()
+              : null,
+            isLive: entry?.isLive ?? false,
+          }
+        } else {
+          exec = {
+            agentId: lane.execAgentId,
+            agentKind: lane.execAgentKind ?? "claude",
+            label: null,
+            lastActivityAt: null,
+            isLive: false,
+          }
+        }
+      }
+      const c = lane.execAgentId ? counts.get(lane.execAgentId) : undefined
+      return {
+        ...lane,
+        exec,
+        liveWorkerCount: c?.live ?? 0,
+        readyForReviewCount: c?.ready ?? 0,
+      }
+    })
+  )
 }
 
 export async function listWorkLanes(

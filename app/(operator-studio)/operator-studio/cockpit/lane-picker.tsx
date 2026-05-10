@@ -1,17 +1,29 @@
 "use client"
 
 /**
- * Top-level work-lane picker for the cockpit. Mobile-first vertical
- * list of lanes for the active workspace, with "+ Create new lane".
- * Selection is purely client-side (localStorage) so switching never
- * triggers a page reload — downstream cockpit panes consume the
- * `selectedLaneId` and refetch as needed.
+ * Lane entry view — the cockpit's primary entry experience.
+ *
+ * On cold reload (no localStorage hint, new device, cache clear, ngrok
+ * vs LAN), this is what David sees first. It is NOT a chip strip — it
+ * is the full-screen entry list. From here he taps an existing lane to
+ * jump in OR taps "Create new lane" to start a fresh one. The default
+ * lane (if backfilled by migration) shows like any other row; there is
+ * no auto-route into it.
+ *
+ * Per-lane rows surface at-a-glance metadata served by the
+ * /api/operator-studio/work-lanes GET endpoint:
+ *   - exec label + last activity + liveness (or "no exec set")
+ *   - live worker count
+ *   - ready-for-review count (needs David's eyes)
+ *
+ * localStorage is used only as a soft "last lane I had open" hint by
+ * the cockpit's parent; this view doesn't persist anything itself.
  */
 
 import * as React from "react"
 import { Plus } from "lucide-react"
 
-export interface WorkLanePickerLane {
+export interface EnrichedWorkLanePickerLane {
   id: string
   workspaceId: string
   name: string
@@ -20,12 +32,15 @@ export interface WorkLanePickerLane {
   execAgentKind: string | null
   createdAt: string
   archivedAt: string | null
-}
-
-interface LanePickerProps {
-  workspaceId: string
-  selectedLaneId: string | null
-  onSelect: (laneId: string) => void
+  exec: {
+    agentId: string
+    agentKind: string
+    label: string | null
+    lastActivityAt: string | null
+    isLive: boolean
+  } | null
+  liveWorkerCount: number
+  readyForReviewCount: number
 }
 
 const LS_KEY_PREFIX = "operator-studio:active-lane:"
@@ -52,53 +67,34 @@ export function setStoredActiveLaneId(
   }
 }
 
-export function LanePicker({
+interface LaneEntryViewProps {
+  workspaceId: string
+  lanes: EnrichedWorkLanePickerLane[]
+  loaded: boolean
+  error: string | null
+  onSelect: (laneId: string) => void
+  onRefresh: () => Promise<unknown>
+}
+
+export function LaneEntryView({
   workspaceId,
-  selectedLaneId,
+  lanes,
+  loaded,
+  error,
   onSelect,
-}: LanePickerProps) {
-  const [lanes, setLanes] = React.useState<WorkLanePickerLane[]>([])
-  const [error, setError] = React.useState<string | null>(null)
+  onRefresh,
+}: LaneEntryViewProps) {
   const [creating, setCreating] = React.useState(false)
   const [newName, setNewName] = React.useState("")
   const [busy, setBusy] = React.useState(false)
-
-  const refresh = React.useCallback(async () => {
-    try {
-      const r = await fetch(
-        `/api/operator-studio/work-lanes?workspaceId=${encodeURIComponent(workspaceId)}`,
-        { cache: "no-store" }
-      )
-      if (!r.ok) {
-        setError(`HTTP ${r.status}`)
-        return
-      }
-      const data = (await r.json()) as { lanes?: WorkLanePickerLane[] }
-      setLanes(Array.isArray(data?.lanes) ? data.lanes : [])
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "fetch failed")
-    }
-  }, [workspaceId])
-
-  React.useEffect(() => {
-    refresh()
-    const id = window.setInterval(refresh, 10_000)
-    return () => window.clearInterval(id)
-  }, [refresh])
-
-  // Auto-select first lane on first load if nothing selected.
-  React.useEffect(() => {
-    if (selectedLaneId) return
-    if (lanes.length === 0) return
-    onSelect(lanes[0].id)
-  }, [lanes, selectedLaneId, onSelect])
+  const [createError, setCreateError] = React.useState<string | null>(null)
 
   async function createLane(e: React.FormEvent) {
     e.preventDefault()
     const name = newName.trim()
     if (!name) return
     setBusy(true)
+    setCreateError(null)
     try {
       const r = await fetch("/api/operator-studio/work-lanes", {
         method: "POST",
@@ -106,74 +102,183 @@ export function LanePicker({
         body: JSON.stringify({ workspaceId, name }),
       })
       if (!r.ok) {
-        setError(`HTTP ${r.status}`)
+        setCreateError(`HTTP ${r.status}`)
         return
       }
-      const data = (await r.json()) as { lane?: WorkLanePickerLane }
-      if (data?.lane) {
-        setNewName("")
-        setCreating(false)
-        await refresh()
-        onSelect(data.lane.id)
-      }
+      const data = (await r.json()) as { lane?: { id: string } }
+      setNewName("")
+      setCreating(false)
+      await onRefresh()
+      if (data?.lane?.id) onSelect(data.lane.id)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "create failed")
+      setCreateError(e instanceof Error ? e.message : "create failed")
     } finally {
       setBusy(false)
     }
   }
 
+  const empty = loaded && lanes.length === 0
+
   return (
-    <div className="w-full px-3 py-2 bg-neutral-950 border-b border-neutral-800 text-sm text-neutral-200">
-      <div className="flex items-center gap-2 overflow-x-auto">
-        {lanes.map((lane) => {
-          const active = lane.id === selectedLaneId
-          return (
-            <button
-              key={lane.id}
-              onClick={() => onSelect(lane.id)}
-              className={
-                "px-3 py-1.5 rounded-full whitespace-nowrap border " +
-                (active
-                  ? "bg-neutral-100 text-neutral-900 border-neutral-100"
-                  : "bg-neutral-900 text-neutral-200 border-neutral-700 hover:border-neutral-500")
-              }
-              aria-pressed={active}
-            >
-              {lane.name}
-            </button>
-          )
-        })}
-        <button
-          onClick={() => setCreating((v) => !v)}
-          className="px-3 py-1.5 rounded-full border border-dashed border-neutral-600 text-neutral-300 hover:text-neutral-100 hover:border-neutral-400 flex items-center gap-1"
-          aria-label="Create new lane"
-        >
-          <Plus size={14} /> New lane
-        </button>
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <div className="px-4 pt-5 pb-3">
+        <div className="text-[14px] font-semibold text-stone-900 dark:text-stone-100">
+          Work lanes
+        </div>
+        <div className="mt-0.5 text-[12px] text-stone-500 dark:text-stone-500">
+          {empty
+            ? "Start a new lane to anoint an executive and spawn workers from there."
+            : "Tap a lane to jump back in, or start a new one."}
+        </div>
       </div>
-      {creating ? (
-        <form onSubmit={createLane} className="mt-2 flex items-center gap-2">
-          <input
-            autoFocus
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="Lane name"
-            disabled={busy}
-            className="flex-1 px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-neutral-100 placeholder:text-neutral-500"
-          />
-          <button
-            type="submit"
-            disabled={busy || newName.trim().length === 0}
-            className="px-3 py-1 rounded bg-neutral-100 text-neutral-900 disabled:opacity-40"
+
+      <div className="px-3 pb-2">
+        {creating ? (
+          <form
+            onSubmit={createLane}
+            className="flex items-center gap-2 px-1 py-1"
           >
-            Create
+            <input
+              autoFocus
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="Lane name (e.g. 'Customer onboarding')"
+              disabled={busy}
+              className="flex-1 px-3 py-2 rounded-md bg-white dark:bg-stone-900 border border-stone-300 dark:border-stone-700 text-[13px] text-stone-900 dark:text-stone-100 placeholder:text-stone-400"
+            />
+            <button
+              type="submit"
+              disabled={busy || newName.trim().length === 0}
+              className="px-3 py-2 rounded-md bg-emerald-600 text-white text-[12.5px] font-semibold disabled:opacity-40 hover:bg-emerald-700"
+            >
+              Create
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setCreating(false)
+                setNewName("")
+              }}
+              className="px-2 py-2 rounded-md text-[12px] text-stone-500 hover:text-stone-700"
+            >
+              Cancel
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setCreating(true)}
+            className="w-full inline-flex items-center justify-center gap-2 px-3 py-3 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[13px] font-semibold"
+          >
+            <Plus className="h-4 w-4" />
+            Create new lane
           </button>
-        </form>
-      ) : null}
-      {error ? (
-        <p className="mt-1 text-xs text-red-400">lane picker: {error}</p>
-      ) : null}
+        )}
+        {createError && (
+          <div className="mt-2 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300">
+            {createError}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="mx-3 mb-2 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300">
+          Couldn&apos;t load lanes: {error}
+        </div>
+      )}
+
+      {!loaded ? (
+        <div className="px-3 py-6 text-center text-[12px] text-stone-500">
+          Loading lanes…
+        </div>
+      ) : lanes.length === 0 ? (
+        <div className="px-3 py-6 text-center text-[12px] text-stone-500">
+          No lanes yet — create one to begin.
+        </div>
+      ) : (
+        <ul className="divide-y divide-stone-200 dark:divide-stone-800 border-y border-stone-200 dark:border-stone-800">
+          {lanes.map((lane) => (
+            <LaneRow key={lane.id} lane={lane} onSelect={onSelect} />
+          ))}
+        </ul>
+      )}
     </div>
   )
+}
+
+function LaneRow({
+  lane,
+  onSelect,
+}: {
+  lane: EnrichedWorkLanePickerLane
+  onSelect: (laneId: string) => void
+}) {
+  const execLabel =
+    lane.exec?.label ??
+    (lane.execAgentId ? lane.execAgentId.slice(0, 24) : "no exec set")
+  const isLive = lane.exec?.isLive ?? false
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onSelect(lane.id)}
+        className="w-full text-left px-4 py-3 active:bg-stone-100 dark:active:bg-stone-800 hover:bg-stone-50 dark:hover:bg-stone-900"
+      >
+        <div className="flex items-center gap-2">
+          <span
+            className={
+              "inline-block h-1.5 w-1.5 rounded-full " +
+              (lane.exec
+                ? isLive
+                  ? "bg-emerald-500 animate-pulse"
+                  : "bg-stone-400"
+                : "bg-stone-300 dark:bg-stone-600")
+            }
+            aria-hidden
+          />
+          <span className="text-[13px] font-semibold text-stone-900 dark:text-stone-100 truncate">
+            {lane.name}
+          </span>
+          {lane.readyForReviewCount > 0 && (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/60 text-[9.5px] font-semibold uppercase tracking-wider text-amber-900 dark:text-amber-200">
+              {lane.readyForReviewCount} needs your eyes
+            </span>
+          )}
+          <span className="ml-auto text-[10px] text-stone-500">
+            {formatRelative(lane.exec?.lastActivityAt ?? lane.createdAt)}
+          </span>
+        </div>
+        <div className="mt-1 flex items-center gap-3 text-[11px] text-stone-500">
+          <span className="truncate" title={lane.execAgentId ?? ""}>
+            {execLabel}
+          </span>
+          {lane.liveWorkerCount > 0 && (
+            <span>
+              {lane.liveWorkerCount} worker
+              {lane.liveWorkerCount === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
+        {lane.description && (
+          <div className="mt-1 text-[11.5px] text-stone-500 dark:text-stone-500 line-clamp-2">
+            {lane.description}
+          </div>
+        )}
+      </button>
+    </li>
+  )
+}
+
+function formatRelative(iso: string | null) {
+  if (!iso) return ""
+  const ms = Date.now() - new Date(iso).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return ""
+  const m = Math.round(ms / 60_000)
+  if (m < 1) return "just now"
+  if (m < 60) return `${m}m ago`
+  const h = Math.round(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.round(h / 24)
+  return `${d}d ago`
 }

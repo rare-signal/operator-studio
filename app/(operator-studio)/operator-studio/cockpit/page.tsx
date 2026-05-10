@@ -7,19 +7,11 @@ import CockpitClient from "./cockpit-client"
 export const dynamic = "force-dynamic"
 export const metadata: Metadata = { title: "Cockpit" }
 
-interface CockpitPageProps {
-  searchParams: Promise<{ exec?: string }>
-}
-
-export default async function CockpitPage({ searchParams }: CockpitPageProps) {
-  const sp = await searchParams
+export default async function CockpitPage() {
   const workspaceId = await getActiveWorkspaceId()
   return (
     <SoundProvider>
-      <CockpitClient
-        initialExecAgentId={sp.exec ?? null}
-        workspaceId={workspaceId}
-      />
+      <CockpitClient workspaceId={workspaceId} />
     </SoundProvider>
   )
 }

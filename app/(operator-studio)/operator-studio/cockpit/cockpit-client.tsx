@@ -77,24 +77,85 @@ const REVIEW_STATUS_RANK: Record<ReviewStatus, number> = {
 const HOME_PREFIX = "/operator-studio"
 
 import {
-  LanePicker,
+  LaneEntryView,
+  type EnrichedWorkLanePickerLane,
   getStoredActiveLaneId,
   setStoredActiveLaneId,
 } from "./lane-picker"
 
 interface CockpitClientProps {
-  initialExecAgentId: string | null
   workspaceId: string
 }
 
 export default function CockpitClient({
-  initialExecAgentId,
   workspaceId,
 }: CockpitClientProps) {
+  // Two-state cockpit:
+  //   activeLaneId === null  → lane-picker entry view (full-screen)
+  //   activeLaneId !== null  → in-lane view (existing cockpit shell)
+  //
+  // The picker is the entry experience. We do NOT auto-route into the
+  // first lane on cold load — even if a "Default lane" was backfilled.
+  // The one exception is the localStorage `last-lane-open` hint: if
+  // it's still present in the live lane list, jump straight back in
+  // (this is the "I had this lane open and reloaded" case). Anything
+  // else surfaces the picker. localStorage is purely a soft hint here,
+  // never the source of truth for "what lanes exist" or "what's the
+  // exec" — both come from the backend.
+  const [lanes, setLanes] = React.useState<EnrichedWorkLanePickerLane[]>([])
+  const [lanesError, setLanesError] = React.useState<string | null>(null)
+  const [lanesLoaded, setLanesLoaded] = React.useState(false)
   const [activeLaneId, setActiveLaneId] = React.useState<string | null>(null)
-  React.useEffect(() => {
-    setActiveLaneId(getStoredActiveLaneId(workspaceId))
+
+  const refreshLanes = React.useCallback(async () => {
+    try {
+      const r = await fetch(
+        `/api/operator-studio/work-lanes?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { cache: "no-store" }
+      )
+      if (!r.ok) {
+        setLanesError(`HTTP ${r.status}`)
+        return
+      }
+      const data = (await r.json()) as {
+        lanes?: EnrichedWorkLanePickerLane[]
+      }
+      const list = Array.isArray(data?.lanes) ? data.lanes : []
+      setLanes(list)
+      setLanesError(null)
+      setLanesLoaded(true)
+      return list
+    } catch (e) {
+      setLanesError(e instanceof Error ? e.message : "fetch failed")
+      setLanesLoaded(true)
+    }
   }, [workspaceId])
+
+  // First-load: fetch lanes; if localStorage hint matches a live lane,
+  // open it. Otherwise stay in the picker view. (No auto-route into the
+  // first lane — that's the bug we're fixing.)
+  const didInitRef = React.useRef(false)
+  React.useEffect(() => {
+    if (didInitRef.current) return
+    didInitRef.current = true
+    ;(async () => {
+      const list = await refreshLanes()
+      const hint = getStoredActiveLaneId(workspaceId)
+      if (hint && Array.isArray(list) && list.some((l) => l.id === hint)) {
+        setActiveLaneId(hint)
+      }
+    })()
+  }, [refreshLanes, workspaceId])
+
+  // Poll lanes so counts (live workers / ready-for-review) and exec
+  // metadata stay fresh while David is in the picker OR inside a lane.
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      refreshLanes()
+    }, 8_000)
+    return () => window.clearInterval(id)
+  }, [refreshLanes])
+
   const selectLane = React.useCallback(
     (laneId: string) => {
       setActiveLaneId(laneId)
@@ -102,11 +163,24 @@ export default function CockpitClient({
     },
     [workspaceId]
   )
+  const backToLanes = React.useCallback(() => {
+    setActiveLaneId(null)
+    setStoredActiveLaneId(workspaceId, null)
+  }, [workspaceId])
+
+  const activeLane = React.useMemo(
+    () => lanes.find((l) => l.id === activeLaneId) ?? null,
+    [lanes, activeLaneId]
+  )
+
+  // Exec source of truth: the lane's `execAgentId` (backend), NOT
+  // localStorage and NOT the URL. Reload preserves anointing because we
+  // re-fetch the lane on mount.
+  const execId: AgentCompositeId | null =
+    (activeLane?.execAgentId as AgentCompositeId | null) ?? null
+
   const [agents, setAgents] = React.useState<AgentListItem[]>([])
   const [agentsError, setAgentsError] = React.useState<string | null>(null)
-  const [execId, setExecId] = React.useState<AgentCompositeId | null>(
-    (initialExecAgentId as AgentCompositeId | null) ?? null
-  )
   const [workerId, setWorkerId] = React.useState<AgentCompositeId | null>(null)
   const [execCollapsed, setExecCollapsed] = React.useState(false)
   // Maximize-pane state for the 50/50 split. Holds the agent id of the
@@ -408,25 +482,73 @@ export default function CockpitClient({
     setMaximizedAgentId(null)
   }, [maximizedAgentId, execId, workerId])
 
-  function pickExec(id: AgentCompositeId) {
-    setExecId(id)
+  async function pickExec(id: AgentCompositeId) {
+    if (!activeLaneId) return
     setWorkerId(null)
     setExecCollapsed(false)
-    const url = new URL(window.location.href)
-    url.searchParams.set("exec", id)
-    window.history.replaceState({}, "", url.toString())
+    // Persist per-lane in operator_work_lanes.exec_agent_id (backend
+    // source of truth). Local lane list is then refreshed so execId
+    // (derived from activeLane.execAgentId) flips immediately.
+    const parsed = id.includes(":") ? id.split(":")[0] : "claude"
+    try {
+      await fetch(
+        `/api/operator-studio/work-lanes/${encodeURIComponent(activeLaneId)}/exec`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ agentId: id, agentKind: parsed }),
+        }
+      )
+    } finally {
+      await refreshLanes()
+    }
   }
 
-  function clearExec() {
-    setExecId(null)
+  async function clearExec() {
+    if (!activeLaneId) return
     setWorkerId(null)
     setExecCollapsed(false)
-    const url = new URL(window.location.href)
-    url.searchParams.delete("exec")
-    window.history.replaceState({}, "", url.toString())
+    try {
+      await fetch(
+        `/api/operator-studio/work-lanes/${encodeURIComponent(activeLaneId)}/exec`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ agentId: null }),
+        }
+      )
+    } finally {
+      await refreshLanes()
+    }
   }
 
   // ── Render shell — same chassis as Bento focused-mobile ──
+  //
+  // Entry state: when no lane is open, render the full-screen lane
+  // picker. This is the primary entry experience David sees on cold
+  // reload (with no localStorage hint), on a new device, after a cache
+  // clear, etc. No auto-route into "Default lane" — David decides.
+  if (activeLaneId === null) {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex flex-col bg-stone-50 dark:bg-stone-950 overflow-hidden"
+        style={{
+          paddingTop: "env(safe-area-inset-top)",
+          paddingBottom: "env(safe-area-inset-bottom)",
+        }}
+      >
+        <LaneEntryView
+          workspaceId={workspaceId}
+          lanes={lanes}
+          loaded={lanesLoaded}
+          error={lanesError}
+          onSelect={selectLane}
+          onRefresh={refreshLanes}
+        />
+      </div>
+    )
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col bg-stone-50 dark:bg-stone-950 overflow-hidden"
@@ -435,16 +557,12 @@ export default function CockpitClient({
         paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
-      <LanePicker
-        workspaceId={workspaceId}
-        selectedLaneId={activeLaneId}
-        onSelect={selectLane}
-      />
-
       <TopRail
         exec={exec}
+        laneName={activeLane?.name ?? null}
         workerActive={!!worker}
         execCollapsed={execCollapsed}
+        onBackToLanes={backToLanes}
         onUnpinExec={clearExec}
         onBackToMain={() => {
           setWorkerId(null)
@@ -709,8 +827,10 @@ function noop() {
 
 function TopRail({
   exec,
+  laneName,
   workerActive,
   execCollapsed,
+  onBackToLanes,
   onUnpinExec,
   onBackToMain,
   onToggleExecCollapsed,
@@ -721,8 +841,10 @@ function TopRail({
   onSetExec,
 }: {
   exec: AgentListItem | null
+  laneName: string | null
   workerActive: boolean
   execCollapsed: boolean
+  onBackToLanes: () => void
   onUnpinExec: () => void
   onBackToMain: () => void
   onToggleExecCollapsed: () => void
@@ -730,7 +852,7 @@ function TopRail({
   onArm: (pin: string, durationMs?: number) => Promise<void>
   onDisarm: () => Promise<void> | void
   onExtend: (extraMs: number) => Promise<void>
-  onSetExec: (id: AgentCompositeId) => void
+  onSetExec: (id: AgentCompositeId) => void | Promise<void>
 }) {
   return (
     // Mirror the Bento focused-mobile rail exactly: `sticky top-0 z-30`.
@@ -739,6 +861,23 @@ function TopRail({
     // than the relative `Pane` sibling below. Without it the Pane
     // paints over the popover via DOM order. Don't remove again.
     <div className="sticky top-0 z-30 shrink-0 flex items-center gap-2 px-3 h-11 border-b border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900">
+      <button
+        type="button"
+        onClick={onBackToLanes}
+        className="inline-flex items-center gap-1 h-7 px-2 -ml-1 rounded text-[11px] font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800"
+        title="Back to lanes"
+        aria-label="Back to lanes"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" /> Lanes
+      </button>
+      {laneName && (
+        <span
+          className="text-[11px] uppercase tracking-wider text-stone-500 truncate max-w-[40vw]"
+          title={laneName}
+        >
+          {laneName}
+        </span>
+      )}
       {workerActive ? (
         <>
           <button
