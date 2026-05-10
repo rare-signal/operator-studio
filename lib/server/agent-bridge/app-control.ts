@@ -161,9 +161,13 @@ const KEY_SCRIPTS: Record<string, string> = {
 const PERMISSION_MODE_BYPASS_PICKER_INDEX = "5"
 
 export async function setClaudeBypassPermissionMode(): Promise<
-  { ok: true } | { ok: false; error: string }
+  { ok: true; refocused: boolean } | { ok: false; error: string }
 > {
-  const r = await runCommand(
+  // Step 1: Cmd+Shift+M opens the permission-mode picker; "5" picks
+  // "Bypass permissions" and dismisses the picker. David verified
+  // this part works on 2026-05-09 — the dropdown lands on the right
+  // mode.
+  const toggle = await runCommand(
     "osascript",
     [
       "-e",
@@ -179,15 +183,25 @@ export async function setClaudeBypassPermissionMode(): Promise<
     ],
     { timeoutMs: 3000 }
   )
-  if (r.code !== 0) {
+  if (toggle.code !== 0) {
     return {
       ok: false,
       error: `bypass-mode toggle failed: ${
-        r.stderr.trim() || "unknown"
+        toggle.stderr.trim() || "unknown"
       } — Accessibility permission needed.`,
     }
   }
-  return { ok: true }
+
+  // Step 2: We tried two refocus approaches that didn't help —
+  // AX-text-area lookup (Claude doesn't expose its input as a standard
+  // text area) and a coordinate click at bottom-center (still no
+  // JSONL appeared after spawn). Skipping refocus entirely now; the
+  // sendToApp call that follows will re-activate Claude, which on
+  // recent attempts seems to be enough to land the paste in the input
+  // when David verifies. If the spawn still misses, we'll re-add a
+  // refocus path with a different mechanism.
+  await new Promise((r) => setTimeout(r, 200))
+  return { ok: true, refocused: false }
 }
 
 export interface SendToAppArgs {

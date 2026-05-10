@@ -247,18 +247,24 @@ export async function createNewAppSessionAndSend(
   }
   await new Promise((r) => setTimeout(r, adapter.postShortcutDelayMs))
 
-  // Best-effort: switch the freshly-opened Claude session to
-  // bypass-permissions mode BEFORE the kickoff prompt is pasted, so
-  // the worker's first action doesn't hit a permission UI gate.
+  // Switch the freshly-opened Claude session to bypass-permissions
+  // mode BEFORE the kickoff prompt is pasted, so the worker's first
+  // action doesn't hit a permission UI gate.
   //
-  // GATED ON ENV VAR. The naive Cmd+Shift+M + "5" sequence broke the
-  // spawn pipeline twice on 2026-05-09 — the picker likely waits for
-  // Enter after the index keystroke, so the subsequent paste landed
-  // in the picker filter instead of the chat input and the new chat
-  // never received the prompt. Set OPERATOR_STUDIO_AUTO_BYPASS=1 to
-  // re-enable for live debugging once we have the right keystroke
-  // sequence figured out (probably "5" + Enter, or arrow-down x 4 +
-  // Enter, or a different shortcut entirely).
+  // Cmd+Shift+M + "5" picks bypass and dismisses the picker — David
+  // verified the dropdown lands correctly. Open question: whether the
+  // picker dismiss leaves focus in the right place for the subsequent
+  // paste; we tried two refocus paths (AX text-area lookup + bottom-
+  // center coordinate click) and the spawn still missed (no new JSONL
+  // appeared). Currently shipping WITHOUT a refocus; the sendToApp
+  // re-activate may be enough.
+  //
+  // Failure is non-fatal — the worker still spawns at default
+  // permission level if anything goes wrong. Codex skipped (no
+  // equivalent picker).
+  //
+  // GATED OFF BY DEFAULT until verified working. Set
+  // OPERATOR_STUDIO_AUTO_BYPASS=1 to enable.
   if (
     args.appKind === "claude" &&
     process.env.OPERATOR_STUDIO_AUTO_BYPASS === "1"
@@ -268,8 +274,12 @@ export async function createNewAppSessionAndSend(
       console.warn(
         `[app-new-session] bypass-mode toggle failed: ${bypass.error}`
       )
+    } else if (!bypass.refocused) {
+      console.warn(
+        `[app-new-session] bypass-mode set but chat-input refocus didn't confirm`
+      )
     }
-    // Settle so the picker close animation doesn't race the paste.
+    // Settle so the picker close animation + refocus don't race the paste.
     await new Promise((r) => setTimeout(r, 200))
   }
 
