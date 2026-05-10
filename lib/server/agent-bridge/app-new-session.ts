@@ -20,7 +20,7 @@ import "server-only"
 import { runCommand } from "./exec"
 import { isValidAppName } from "./exec"
 import { listAppSessions, type AppSlug } from "./app-sessions"
-import { sendToApp } from "./app-control"
+import { sendToApp, setClaudeBypassPermissionMode } from "./app-control"
 import type { AgentCompositeId } from "./types"
 
 export interface NewSessionAdapter {
@@ -246,6 +246,23 @@ export async function createNewAppSessionAndSend(
     }
   }
   await new Promise((r) => setTimeout(r, adapter.postShortcutDelayMs))
+
+  // Best-effort: switch the freshly-opened Claude session to
+  // bypass-permissions mode BEFORE the kickoff prompt is pasted, so
+  // the worker's first action doesn't hit a permission UI gate. This
+  // adds ~400ms to the spawn pipeline. Failure is non-fatal — the
+  // worker still spawns, just at default permission level. Codex
+  // doesn't have an equivalent picker so we skip it there.
+  if (args.appKind === "claude") {
+    const bypass = await setClaudeBypassPermissionMode()
+    if (!bypass.ok) {
+      console.warn(
+        `[app-new-session] bypass-mode toggle failed: ${bypass.error}`
+      )
+    }
+    // Settle so the picker close animation doesn't race the paste.
+    await new Promise((r) => setTimeout(r, 200))
+  }
 
   // Reuse sendToApp for the paste + submit dance. The app is already
   // frontmost and on a fresh chat, so re-activating is harmless.

@@ -133,6 +133,63 @@ const KEY_SCRIPTS: Record<string, string> = {
   tab: `tell application "System Events" to key code 48`,
 }
 
+/**
+ * Switch the currently-active Claude Code Desktop session to
+ * "Bypass permissions" mode via keystroke automation.
+ *
+ * Per claude-code-guide research (2026-05-09): Claude Desktop has no
+ * settings.json knob, no slash command, and no launch flag for this.
+ * The only way is the Cmd+Shift+M permission-mode picker. David has
+ * dismissed the "are you sure?" confirmation so the picker selection
+ * is single-keystroke now.
+ *
+ * Best-effort: returns ok:false on failure but the caller is expected
+ * to log + continue — failing the whole spawn over a permission-mode
+ * toggle would be worse than landing in default mode. Adds ~400ms to
+ * the spawn pipeline (300ms for the picker to render + 100ms settle
+ * after the index keystroke).
+ *
+ * Caller MUST have already activated Claude Desktop and opened a new
+ * chat window (post-Cmd+N + focus settle). Runs against whatever app
+ * is currently frontmost — if Claude lost focus, the keystrokes go
+ * elsewhere.
+ *
+ * If Claude Desktop's picker layout changes (the "5" stops being
+ * Bypass permissions), this silently sets the wrong mode — we have
+ * no way to verify without a visual check.
+ */
+const PERMISSION_MODE_BYPASS_PICKER_INDEX = "5"
+
+export async function setClaudeBypassPermissionMode(): Promise<
+  { ok: true } | { ok: false; error: string }
+> {
+  const r = await runCommand(
+    "osascript",
+    [
+      "-e",
+      `tell application "System Events"`,
+      "-e",
+      `  keystroke "m" using {command down, shift down}`,
+      "-e",
+      `  delay 0.3`,
+      "-e",
+      `  keystroke "${PERMISSION_MODE_BYPASS_PICKER_INDEX}"`,
+      "-e",
+      `end tell`,
+    ],
+    { timeoutMs: 3000 }
+  )
+  if (r.code !== 0) {
+    return {
+      ok: false,
+      error: `bypass-mode toggle failed: ${
+        r.stderr.trim() || "unknown"
+      } — Accessibility permission needed.`,
+    }
+  }
+  return { ok: true }
+}
+
 export interface SendToAppArgs {
   app: string
   text?: string
