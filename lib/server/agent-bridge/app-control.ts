@@ -450,6 +450,41 @@ export async function sendToApp(args: SendToAppArgs): Promise<
         }
       }
     }
+    // ── Universal Clipboard collision guard (2026-05-10) ──
+    // iOS Universal Clipboard re-syncs from David's iPhone during the
+    // 500ms activate-settle window above, replacing the kickoff prompt
+    // we just pbcopy'd with whatever was last on his phone (e.g. a
+    // tweet URL). Verify the clipboard contents match `text` BEFORE
+    // pressing Cmd+V; if not, re-pbcopy and verify once more before
+    // failing explicitly with a clear error so we never silently paste
+    // the wrong thing.
+    let verifyPaste = await runCommand("pbpaste", [], { timeoutMs: 1500 })
+    if (verifyPaste.code === 0 && verifyPaste.stdout !== text) {
+      console.warn(
+        `[sendToApp] clipboard collision detected (probably Universal Clipboard from iPhone); retrying pbcopy`
+      )
+      const repbcopy = await runCommand("pbcopy", [], {
+        input: text,
+        timeoutMs: 3000,
+      })
+      if (repbcopy.code !== 0) {
+        return {
+          error: `pbcopy (post-collision) failed: ${
+            repbcopy.stderr.trim() || "unknown"
+          }`,
+          status: 500,
+        }
+      }
+      // Brief settle after retry, then verify once more.
+      await new Promise((r) => setTimeout(r, 200))
+      verifyPaste = await runCommand("pbpaste", [], { timeoutMs: 1500 })
+      if (verifyPaste.code === 0 && verifyPaste.stdout !== text) {
+        return {
+          error: `clipboard collision: paste content does not match the prompt — Universal Clipboard or another app keeps stomping on us. Disable Universal Clipboard or close the app that's auto-copying, then retry.`,
+          status: 500,
+        }
+      }
+    }
     const paste = await runCommand(
       "osascript",
       [
