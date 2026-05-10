@@ -154,3 +154,41 @@ That prompt addendum applies symmetrically to executive threads AND worker threa
 - Sibling pattern this models on: `lib/operator-studio/power-strings.ts` (single-token detector for `task_done`).
 - Cockpit UI to extend: `app/(operator-studio)/operator-studio/cockpit/cockpit-client.tsx` (and its child components).
 - Spawn scripts to update with the addendum: `scripts/spawn-cockpit-worker.ts`, `scripts/spawn-cockpit-cross-platform-worker.ts`, `scripts/spawn-cockpit-pending-affordance-worker.ts`.
+
+---
+
+## v2 (2026-05-09 same-day): bigger pills + optional description + sparkle modal
+
+### Why
+
+David ran v1 on mobile and gave three concrete pieces of feedback:
+1. **Pills are too small** — hard to tap accurately.
+2. **Long labels truncate** — chip labels are inherently long-ish and the single-line ellipsis hides them.
+3. **No "why pick this one now" affordance** — wants situational context per suggestion without making the chips themselves walls of text.
+
+David's framing: *"smaller package, more decision-making power per square inch."* A "magical AI icon button" you tap reveals a curated set of suggestions, each with a title + short description. Conscious of attention budget — NOT three more walls of text.
+
+### Sentinel syntax — backwards-compatible
+
+```
+<<chip:LABEL>>                  # v1, still valid
+<<chip:LABEL|DESCRIPTION>>      # v2, description optional
+```
+
+Parser splits on the **first** `|`. Subsequent pipes inside the description are preserved literally. Empty descriptions (`<<chip:A|>>`) normalize to `undefined` so the sparkle modal never opens over a blank card.
+
+### Render — dual-surface
+
+1. **Inline pills** — bigger touch target (`py-2`, `text-[13px]`, `min-h-[40px]`), 2-line wrap (`whitespace-normal line-clamp-2`) so long labels no longer ellipsize. Label-only.
+2. **Sparkle (✨) button** — appears next to the pill row IFF at least one chip carries a description. Tap opens a popover with one card per described chip: label as title, description below in smaller text. Long descriptions soft-truncate at ~120 chars in the card (no further expand-on-tap — chip text IS the action; the description is just orientation).
+
+Tap behavior on EITHER surface fills the composer with the chip's `label` (never the description), focuses the textarea, no auto-send.
+
+### Files touched (v2)
+
+- `lib/operator-studio/chip-actions.ts` — `ChipInstance.description?: string`; parser splits on first `|`.
+- `lib/operator-studio/chip-actions.test.ts` — added 6 description cases (with/without, multi-pipe, empty, whitespace, label-only-empty drop).
+- `app/2/v2/components/bento-view.tsx` — extracted `ChipPillRow` component with inline pills + Popover-based sparkle modal.
+- `scripts/spawn-cockpit-worker.ts`, `scripts/spawn-cockpit-cross-platform-worker.ts`, `scripts/spawn-cockpit-pending-affordance-worker.ts` — addendum noting the optional `|DESCRIPTION`.
+
+Plan card: `step-exec-chip-system-v2`.

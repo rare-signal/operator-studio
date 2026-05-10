@@ -67,6 +67,8 @@ const KICKOFF_PROMPT = `You are a Claude worker spawned by the Operator Studio c
 
 When you finish a substantive turn (a deliverable, a status, a decision point), end with **up to three** \`<<chip:...>>\` lines representing the most likely next user messages — concrete, self-contained, ready-to-send. Each \`<<chip:...>>\` should be its own line. The LABEL inside the sentinel is the literal text that will become the user's next message when they tap the chip, so write it as a complete request the receiving agent can act on without further context. Skip chips entirely if no clear next-action stands out.
 
+Optionally append \`|DESCRIPTION\` to a chip to give the user a one-line "why pick this now" rationale: \`<<chip:LABEL|DESCRIPTION>>\`. Inline pills show only the label; the sparkle (✨) modal next to the pill row shows label + description. Keep descriptions short — under ~80 chars. Only add a description if it materially helps the decision; short, self-explanatory chips don't need one.
+
 ## Provenance
 
 You were spawned by exec \`${EXEC_AGENT_ID}\` against plan card \`${PLAN_STEP_ID}\`. The cockpit watches for \`task_done\` to surface your completion.`

@@ -83,6 +83,52 @@ describe("parseChipsFromMessage", () => {
     const msg = ["Three options:", "  <<chip:A>>  ", "<<chip:B>>", "\t<<chip:C>>\t"].join("\n")
     expect(parseChipsFromMessage(msg).map((c) => c.label)).toEqual(["A", "B", "C"])
   })
+
+  // v2 (2026-05-09): optional `|description` after the label. Inline
+  // pills still render label-only; the sparkle (✨) modal surfaces the
+  // description as "why pick this now" orientation text.
+  it("parses an optional description after the first pipe", () => {
+    const msg = `<<chip:Approve|Worker 1's report is committed>>`
+    expect(parseChipsFromMessage(msg)).toEqual([
+      {
+        label: "Approve",
+        description: "Worker 1's report is committed",
+        index: 0,
+      },
+    ])
+  })
+
+  it("leaves description undefined when no pipe is present (back-compat)", () => {
+    const chip = parseChipsFromMessage(`<<chip:Approve>>`)[0]
+    expect(chip).toEqual({ label: "Approve", index: 0 })
+    expect(chip.description).toBeUndefined()
+  })
+
+  it("only splits on the FIRST pipe — subsequent pipes live in the description", () => {
+    const msg = `<<chip:A|B|C>>`
+    expect(parseChipsFromMessage(msg)).toEqual([
+      { label: "A", description: "B|C", index: 0 },
+    ])
+  })
+
+  it("normalizes an empty description to undefined", () => {
+    // `<<chip:A|>>` and `<<chip:A|   >>` both mean "no description";
+    // the sparkle modal never opens over a blank card.
+    const a = parseChipsFromMessage(`<<chip:A|>>`)[0]
+    expect(a).toEqual({ label: "A", index: 0 })
+    expect(a.description).toBeUndefined()
+    const b = parseChipsFromMessage(`<<chip:A|   >>`)[0]
+    expect(b.description).toBeUndefined()
+  })
+
+  it("trims whitespace around the description", () => {
+    const msg = `<<chip:Approve|  ship it now  >>`
+    expect(parseChipsFromMessage(msg)[0].description).toBe("ship it now")
+  })
+
+  it("drops chips with empty label even when a description is provided", () => {
+    expect(parseChipsFromMessage(`<<chip:|just context>>`)).toEqual([])
+  })
 })
 
 describe("stripChipSentinels", () => {
