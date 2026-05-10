@@ -269,7 +269,7 @@ export async function createNewAppSessionAndSend(
   // structural answer.
   if (
     args.appKind === "claude" &&
-    process.env.OPERATOR_STUDIO_AUTO_BYPASS === "1"
+    process.env.OPERATOR_STUDIO_AUTO_BYPASS !== "0"
   ) {
     const bypass = await setClaudeBypassPermissionMode()
     if (!bypass.ok) {
