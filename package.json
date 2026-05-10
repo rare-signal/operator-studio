@@ -57,6 +57,7 @@
     "os:cycle": "node --import tsx --import ./scripts/tsx-loader-register.mjs --env-file-if-exists=.env.local --env-file-if-exists=.env ./scripts/operator-cycle.ts",
     "os:operations": "node --import tsx --import ./scripts/tsx-loader-register.mjs --env-file-if-exists=.env.local --env-file-if-exists=.env ./scripts/operator-operations.ts",
     "os:planners": "node --import tsx --import ./scripts/tsx-loader-register.mjs --env-file-if-exists=.env.local --env-file-if-exists=.env ./scripts/planner-backends.ts",
+    "os:workers": "node --import tsx --import ./scripts/tsx-loader-register.mjs --env-file-if-exists=.env.local --env-file-if-exists=.env ./scripts/cockpit-workers.ts",
     "os:ado": "node --import tsx --import ./scripts/tsx-loader-register.mjs --env-file-if-exists=.env.local --env-file-if-exists=.env ./scripts/ado-lookup.ts",
     "os:ado-triage": "node --import tsx --import ./scripts/tsx-loader-register.mjs --env-file-if-exists=.env.local --env-file-if-exists=.env ./scripts/ado-triage.ts",
     "os:hydrate": "node --import tsx --import ./scripts/tsx-loader-register.mjs --env-file-if-exists=.env.local --env-file-if-exists=.env ./scripts/operator-hydrate.ts",
