@@ -38,10 +38,12 @@ import { NextResponse, type NextRequest } from "next/server"
 
 import { authorizeRequest } from "@/lib/operator-studio/auth"
 import {
-  getPowerStrings,
-  matchesPowerString,
-} from "@/lib/operator-studio/power-strings"
+  computeReviewStatus,
+  extractLastAssistantSnippet,
+  type ReviewStatus,
+} from "@/lib/operator-studio/review-status"
 import {
+  autoDetachStaleReadyWorkers,
   getActiveBindingsSpawnedBy,
   getRecentlyDetachedBindingsSpawnedBy,
 } from "@/lib/operator-studio/thread-card-bindings"
@@ -50,49 +52,8 @@ import {
   getAppSessionEntry,
   getAppSessionTail,
   type AppSlug,
-  type Turn,
 } from "@/lib/server/agent-bridge/app-sessions"
 import { parseAgentId } from "@/lib/server/agent-bridge/types"
-
-export type ReviewStatus = "live" | "ready-for-review" | "idle"
-
-const REVIEW_IDLE_THRESHOLD_MS = 5 * 60 * 1000
-
-function computeReviewStatus(
-  turns: Turn[],
-  lastActivityAt: string | null
-): ReviewStatus {
-  let lastAssistantIdx = -1
-  let lastUserIdx = -1
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const r = turns[i].role
-    if (lastAssistantIdx < 0 && r === "assistant") lastAssistantIdx = i
-    if (lastUserIdx < 0 && r === "user") lastUserIdx = i
-    if (lastAssistantIdx >= 0 && lastUserIdx >= 0) break
-  }
-  const taskDoneSpec = getPowerStrings().find((s) => s.id === "task-done-token")
-  // Only "ready-for-review" if the last assistant turn matches task_done
-  // AND no user turn has come after it (a later user reply means David
-  // re-engaged — flip back to live).
-  if (
-    taskDoneSpec &&
-    lastAssistantIdx >= 0 &&
-    lastAssistantIdx > lastUserIdx
-  ) {
-    const content = turns[lastAssistantIdx].parts
-      .filter((p): p is { kind: "text"; text: string } => p.kind === "text")
-      .map((p) => p.text)
-      .join("\n")
-    if (matchesPowerString(taskDoneSpec, "assistant", content)) {
-      return "ready-for-review"
-    }
-  }
-  const ageMs = lastActivityAt
-    ? Date.now() - Date.parse(lastActivityAt)
-    : Number.POSITIVE_INFINITY
-  if (Number.isFinite(ageMs) && ageMs > REVIEW_IDLE_THRESHOLD_MS) return "idle"
-  return "live"
-}
 
 export const dynamic = "force-dynamic"
 
@@ -106,6 +67,22 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "exec required" }, { status: 400 })
   }
   const workspaceId = await getActiveWorkspaceId()
+
+  // Safety-net auto-detach: stale ready-for-review workers that David
+  // never circled back to get pulled out of the active rail before we
+  // compute the response. Configurable via env var; "0" disables.
+  const autoDetachMinutesRaw = process.env.OPERATOR_STUDIO_AUTO_DETACH_MINUTES
+  const autoDetachMinutes =
+    autoDetachMinutesRaw === undefined
+      ? 60
+      : Math.max(0, Number(autoDetachMinutesRaw) || 0)
+  if (autoDetachMinutes > 0) {
+    await autoDetachStaleReadyWorkers(
+      workspaceId,
+      autoDetachMinutes * 60_000
+    ).catch(() => 0)
+  }
+
   const [active, detached] = await Promise.all([
     getActiveBindingsSpawnedBy(workspaceId, exec),
     getRecentlyDetachedBindingsSpawnedBy(workspaceId, exec, 200),
@@ -121,7 +98,13 @@ export async function GET(req: NextRequest) {
   all.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   const firstByAgent = new Map<
     string,
-    { agentId: string; agentKind: string; spawnedAt: string; active: boolean }
+    {
+      agentId: string
+      agentKind: string
+      spawnedAt: string
+      active: boolean
+      detachReason: string | null
+    }
   >()
   for (const b of all) {
     const prior = firstByAgent.get(b.agentId)
@@ -131,9 +114,14 @@ export async function GET(req: NextRequest) {
         agentKind: b.agentKind,
         spawnedAt: b.createdAt,
         active: b.detachedAt === null,
+        detachReason: b.detachedAt !== null ? b.detachReason : null,
       })
-    } else if (b.detachedAt === null) {
-      prior.active = true
+    } else {
+      if (b.detachedAt === null) prior.active = true
+      // Always prefer the most-recent detach reason if present.
+      if (b.detachedAt !== null && b.detachReason) {
+        prior.detachReason = b.detachReason
+      }
     }
   }
 
@@ -156,6 +144,7 @@ export async function GET(req: NextRequest) {
           title: null as string | null,
           isLive: false,
           reviewStatus: "idle" as ReviewStatus,
+          lastAssistantSnippet: null as string | null,
         }
       }
       const parsed = parseAgentId(w.agentId)
@@ -170,6 +159,7 @@ export async function GET(req: NextRequest) {
           title: null,
           isLive: false,
           reviewStatus: "idle" as ReviewStatus,
+          lastAssistantSnippet: null as string | null,
         }
       }
       const app: AppSlug = parsed.kind
@@ -185,6 +175,7 @@ export async function GET(req: NextRequest) {
           title: null,
           isLive: false,
           reviewStatus: "idle" as ReviewStatus,
+          lastAssistantSnippet: null as string | null,
         }
       }
       // Status comes from parsing the JSONL tail (matches the
@@ -196,11 +187,13 @@ export async function GET(req: NextRequest) {
         entry.isLive ? "streaming" : "idle"
       const lastActivityAt = new Date(entry.mtimeMs).toISOString()
       let reviewStatus: ReviewStatus = "live"
+      let lastAssistantSnippet: string | null = null
       try {
         const tail = await getAppSessionTail(app, parsed.ref, 50)
         if (!("error" in tail)) {
           status = tail.status
           reviewStatus = computeReviewStatus(tail.turns, lastActivityAt)
+          lastAssistantSnippet = extractLastAssistantSnippet(tail.turns)
         } else {
           reviewStatus = computeReviewStatus([], lastActivityAt)
         }
@@ -217,6 +210,7 @@ export async function GET(req: NextRequest) {
         title: entry.title,
         isLive: entry.isLive,
         reviewStatus,
+        lastAssistantSnippet,
       }
     })
   )

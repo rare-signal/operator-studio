@@ -20,11 +20,18 @@ import "server-only"
 
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm"
 
+import { computeReviewStatus } from "@/lib/operator-studio/review-status"
+import {
+  getAppSessionEntry,
+  getAppSessionTail,
+  type AppSlug,
+} from "@/lib/server/agent-bridge/app-sessions"
 import { getDb } from "@/lib/server/db/client"
 import {
   operatorCockpitExecs,
   operatorThreadCardBindings,
 } from "@/lib/server/db/schema"
+import { parseAgentId } from "@/lib/server/agent-bridge/types"
 
 export type ThreadBindingSource =
   | "launch"
@@ -53,6 +60,9 @@ export interface ThreadCardBinding {
   /** When this binding was retired (worker marked complete or
    *  reattached to a different card). Null for active bindings. */
   detachedAt: string | null
+  /** Free-form rationale captured at detach time. Null if the binding
+   *  is still active or was detached without a reason. */
+  detachReason: string | null
 }
 
 export interface UpsertThreadCardBindingInput {
@@ -91,6 +101,7 @@ function rowToBinding(row: typeof operatorThreadCardBindings.$inferSelect): Thre
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     detachedAt: row.detachedAt ? row.detachedAt.toISOString() : null,
+    detachReason: row.detachReason ?? null,
   }
 }
 
@@ -296,16 +307,23 @@ export async function getActiveBindingsForAgents(
   return rows.map(rowToBinding)
 }
 
-/** Detach an agent from whatever card it currently maps to. */
+/** Detach an agent from whatever card it currently maps to. The
+ *  optional `detachReason` is persisted on the row for the
+ *  recently-completed drawer (and for follow-on tooling). */
 export async function detachThreadCardBinding(
   workspaceId: string,
-  agentId: string
+  agentId: string,
+  detachReason?: string | null
 ): Promise<boolean> {
   const db = getDb()
   const now = new Date()
   const updated = await db
     .update(operatorThreadCardBindings)
-    .set({ detachedAt: now, updatedAt: now })
+    .set({
+      detachedAt: now,
+      updatedAt: now,
+      detachReason: detachReason ?? null,
+    })
     .where(
       and(
         eq(operatorThreadCardBindings.workspaceId, workspaceId),
@@ -315,4 +333,56 @@ export async function detachThreadCardBinding(
     )
     .returning({ id: operatorThreadCardBindings.id })
   return updated.length > 0
+}
+
+/**
+ * Safety-net auto-detach: walks active bindings in the workspace, and
+ * for each whose reviewStatus is "ready-for-review" AND whose last
+ * touch (updatedAt) is older than `thresholdMs`, detaches the binding
+ * with a synthetic reason. This protects the active rail from bloating
+ * with stale workers David never circled back to.
+ *
+ * Recently-completed preserves visibility — the operator can still tap
+ * into the worker's final messages from the drawer.
+ *
+ * Returns the count of bindings that were detached this call.
+ */
+export async function autoDetachStaleReadyWorkers(
+  workspaceId: string,
+  thresholdMs: number = 60 * 60_000
+): Promise<number> {
+  if (!Number.isFinite(thresholdMs) || thresholdMs <= 0) return 0
+  const active = await listActiveThreadCardBindings(workspaceId)
+  if (active.length === 0) return 0
+  const now = Date.now()
+  let detached = 0
+  for (const b of active) {
+    const ageMs = now - Date.parse(b.updatedAt)
+    if (!Number.isFinite(ageMs) || ageMs <= thresholdMs) continue
+    const parsed = parseAgentId(b.agentId)
+    if (parsed.kind !== "claude" && parsed.kind !== "codex") continue
+    const app: AppSlug = parsed.kind
+    const entry = await getAppSessionEntry(app, parsed.ref).catch(() => null)
+    const lastActivityAt = entry ? new Date(entry.mtimeMs).toISOString() : null
+    let reviewStatus: "live" | "ready-for-review" | "idle"
+    try {
+      const tail = await getAppSessionTail(app, parsed.ref, 50)
+      if ("error" in tail) {
+        reviewStatus = computeReviewStatus([], lastActivityAt)
+      } else {
+        reviewStatus = computeReviewStatus(tail.turns, lastActivityAt)
+      }
+    } catch {
+      reviewStatus = computeReviewStatus([], lastActivityAt)
+    }
+    if (reviewStatus !== "ready-for-review") continue
+    const minutes = Math.round(thresholdMs / 60_000)
+    const ok = await detachThreadCardBinding(
+      workspaceId,
+      b.agentId,
+      `auto-detached after ${minutes}min ready-for-review`
+    )
+    if (ok) detached += 1
+  }
+  return detached
 }

@@ -83,7 +83,11 @@ async function main() {
     process.exit(1)
   }
 
-  const detached = await detachThreadCardBinding(GLOBAL_WORKSPACE_ID, args.agent)
+  const detached = await detachThreadCardBinding(
+    GLOBAL_WORKSPACE_ID,
+    args.agent,
+    args.reason
+  )
   if (!detached) {
     if (args.json) {
       console.log(JSON.stringify({ ok: false, error: "detach-failed" }, null, 2))

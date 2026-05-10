@@ -1021,6 +1021,10 @@ export const operatorThreadCardBindings = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
     /** Soft-detach. Keeps the historical link out of "current" reads. */
     detachedAt: timestamp("detached_at", { withTimezone: true }),
+    /** Free-form rationale supplied at detach time (e.g. via
+     *  `cockpit-mark-done --reason=...` or auto-detach). Null for
+     *  bindings detached without a reason or pre-0032. */
+    detachReason: text("detach_reason"),
   },
   // The migration also creates a partial unique index on
   // (workspace_id, agent_id) WHERE detached_at IS NULL — drizzle's

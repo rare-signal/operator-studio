@@ -34,8 +34,8 @@ export async function GET(
     return NextResponse.json({ error: parsed.error }, { status: 400 })
   }
 
-  const linesRaw = Number(req.nextUrl.searchParams.get("lines") ?? 18)
-  const lines = Math.max(4, Math.min(2000, linesRaw || 18))
+  const linesRaw = Number(req.nextUrl.searchParams.get("lines") ?? 100)
+  const lines = Math.max(4, Math.min(2000, linesRaw || 100))
 
   if (parsed.kind === "tmux") {
     if (!isValidSessionName(parsed.ref)) {
@@ -72,23 +72,9 @@ export async function GET(
   if ("error" in tail) {
     return NextResponse.json({ error: tail.error }, { status: tail.status })
   }
-  // Slice the tail forward from the user's most recent turn so the
-  // cockpit's executive thread always opens AT David's last sent
-  // message. The AI's reply naturally appears below it as the browser
-  // renders top-down — no scroll-anchor math required client-side.
-  // Doing the slice server-side means every consumer (focused-pane,
-  // main-cockpit exec, future panes) gets the right shape for free.
-  // When the tail has no user turn yet (fresh session), nothing is
-  // sliced and the UI just renders whatever's there.
-  let lastUserIdx = -1
-  for (let i = tail.turns.length - 1; i >= 0; i--) {
-    if (tail.turns[i].role === "user") {
-      lastUserIdx = i
-      break
-    }
-  }
-  const sliceFrom = lastUserIdx >= 0 ? lastUserIdx : 0
-  const slicedTurns = tail.turns.slice(sliceFrom)
+  // Hard-cap to the trailing N turns (default 100, override via
+  // ?lines=). No anchor slicing — the client renders bottom-anchored.
+  const slicedTurns = tail.turns.slice(-lines)
 
   const snapshot: AgentSnapshot = {
     id: `${parsed.kind}:${parsed.ref}` as AgentSnapshot["id"],
@@ -96,7 +82,6 @@ export async function GET(
     capturedAt: new Date().toISOString(),
     status: tail.status,
     turns: slicedTurns,
-    earlierTurnsHidden: sliceFrom,
     fileMtime: tail.fileMtime,
     pendingBytes: tail.pendingBytes,
   }
