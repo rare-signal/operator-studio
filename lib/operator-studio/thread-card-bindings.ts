@@ -18,7 +18,7 @@
 
 import "server-only"
 
-import { and, desc, eq, inArray, isNull } from "drizzle-orm"
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm"
 
 import { getDb } from "@/lib/server/db/client"
 import { operatorThreadCardBindings } from "@/lib/server/db/schema"
@@ -47,6 +47,9 @@ export interface ThreadCardBinding {
   createdBy: string | null
   createdAt: string
   updatedAt: string
+  /** When this binding was retired (worker marked complete or
+   *  reattached to a different card). Null for active bindings. */
+  detachedAt: string | null
 }
 
 export interface UpsertThreadCardBindingInput {
@@ -84,6 +87,7 @@ function rowToBinding(row: typeof operatorThreadCardBindings.$inferSelect): Thre
     createdBy: row.createdBy ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    detachedAt: row.detachedAt ? row.detachedAt.toISOString() : null,
   }
 }
 
@@ -198,6 +202,38 @@ export async function getActiveBindingsSpawnedBy(
       )
     )
     .orderBy(desc(operatorThreadCardBindings.createdAt))
+  return rows.map(rowToBinding)
+}
+
+/**
+ * Recently detached (= "completed", from the cockpit's POV) bindings
+ * spawned by a specific executive agent. Drives the cockpit's
+ * "recently completed workers" collapsible section under the active
+ * rail. Detached rows preserve full binding history; ordering is by
+ * detach time, most recent first.
+ *
+ * The plan-card status the worker was operating on is independent of
+ * this binding's detach state — a card can stay in-motion while the
+ * binding is detached because Phase 2 hasn't started yet.
+ */
+export async function getRecentlyDetachedBindingsSpawnedBy(
+  workspaceId: string,
+  spawnedByAgentId: string,
+  limit = 10
+): Promise<ThreadCardBinding[]> {
+  const db = getDb()
+  const rows = await db
+    .select()
+    .from(operatorThreadCardBindings)
+    .where(
+      and(
+        eq(operatorThreadCardBindings.workspaceId, workspaceId),
+        eq(operatorThreadCardBindings.spawnedByAgentId, spawnedByAgentId),
+        isNotNull(operatorThreadCardBindings.detachedAt)
+      )
+    )
+    .orderBy(desc(operatorThreadCardBindings.detachedAt))
+    .limit(limit)
   return rows.map(rowToBinding)
 }
 
