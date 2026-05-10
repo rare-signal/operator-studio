@@ -1,17 +1,15 @@
 /**
  * Parser tests for the exec chip system. Locks the syntax contract so
- * Worker 4 can implement handlers + UI render against a stable shape.
+ * Worker 4 can wire the cockpit render against a stable shape.
  *
- * Doesn't test handlers — those are Phase 2 stubs that throw.
+ * The chip system is deliberately small: a parser + a stripper. There
+ * are no typed actions, no registry, no dispatcher — the agent on the
+ * receiving end reads the natural-language label and acts.
  */
 
 import { describe, expect, it } from "vitest"
 
-import {
-  isKnownChipActionId,
-  parseChipsFromMessage,
-  stripChipSentinels,
-} from "./chip-actions"
+import { parseChipsFromMessage, stripChipSentinels } from "./chip-actions"
 
 describe("parseChipsFromMessage", () => {
   it("returns empty array on empty / non-string input", () => {
@@ -22,78 +20,59 @@ describe("parseChipsFromMessage", () => {
     expect(parseChipsFromMessage(undefined)).toEqual([])
   })
 
-  it("extracts a single well-formed chip", () => {
-    const msg = `Phase 1 done. <<chip:{"action":"mark-step-covered","label":"Mark covered","params":{"planStepId":"step-x"}}>>`
-    const chips = parseChipsFromMessage(msg)
-    expect(chips).toHaveLength(1)
-    expect(chips[0]).toMatchObject({
-      action: "mark-step-covered",
-      label: "Mark covered",
-      params: { planStepId: "step-x" },
-      index: 0,
-    })
+  it("extracts a single chip", () => {
+    const msg = `Phase 1 done. <<chip:Approve Phase 2 for Worker 1>>`
+    expect(parseChipsFromMessage(msg)).toEqual([
+      { label: "Approve Phase 2 for Worker 1", index: 0 },
+    ])
   })
 
   it("extracts multiple chips and indexes them in emission order", () => {
     const msg = [
       "Three options:",
-      `<<chip:{"action":"approve-phase-2","label":"Go","params":{"planStepId":"step-a"}}>>`,
-      `<<chip:{"action":"view-deliverable","label":"Read it","params":{"path":"foo.md"}}>>`,
-      `<<chip:{"action":"mark-step-skipped","label":"Skip","params":{"planStepId":"step-a"}}>>`,
+      `<<chip:Approve Phase 2 for plan-cleanup>>`,
+      `<<chip:Read Worker 2's field report>>`,
+      `<<chip:Hold and revisit tomorrow>>`,
     ].join("\n")
     const chips = parseChipsFromMessage(msg)
     expect(chips).toHaveLength(3)
-    expect(chips.map((c) => c.action)).toEqual([
-      "approve-phase-2",
-      "view-deliverable",
-      "mark-step-skipped",
+    expect(chips.map((c) => c.label)).toEqual([
+      "Approve Phase 2 for plan-cleanup",
+      "Read Worker 2's field report",
+      "Hold and revisit tomorrow",
     ])
     expect(chips.map((c) => c.index)).toEqual([0, 1, 2])
   })
 
-  it("falls back to default label when label is missing/blank", () => {
-    const msg = `<<chip:{"action":"mark-worker-done","params":{"agentId":"claude:abc"}}>>`
-    const chips = parseChipsFromMessage(msg)
-    expect(chips).toHaveLength(1)
-    expect(chips[0].label).toBe("Mark worker done")
+  it("trims surrounding whitespace from labels", () => {
+    const msg = `<<chip:   Approve Phase 2   >>`
+    expect(parseChipsFromMessage(msg)[0].label).toBe("Approve Phase 2")
   })
 
-  it("drops malformed JSON silently", () => {
-    const msg = `Hi <<chip:{not json}>> still here`
-    expect(parseChipsFromMessage(msg)).toEqual([])
+  it("drops chips with empty / whitespace-only labels", () => {
+    expect(parseChipsFromMessage(`<<chip:>>`)).toEqual([])
+    expect(parseChipsFromMessage(`<<chip:   >>`)).toEqual([])
   })
 
-  it("drops unknown action ids silently (registry is the allowlist)", () => {
-    const msg = `<<chip:{"action":"definitely-not-a-real-action","label":"Hack","params":{}}>>`
-    expect(parseChipsFromMessage(msg)).toEqual([])
+  it("preserves punctuation, quotes, and identifiers in labels", () => {
+    const msg = `<<chip:Mark "step-mobile-cockpit-smoke-test-worker-spawn-plan-cleanup" covered>>`
+    expect(parseChipsFromMessage(msg)[0].label).toBe(
+      `Mark "step-mobile-cockpit-smoke-test-worker-spawn-plan-cleanup" covered`
+    )
   })
 
-  it("drops chips with non-string action", () => {
-    const msg = `<<chip:{"action":42,"label":"x"}>>`
-    expect(parseChipsFromMessage(msg)).toEqual([])
-  })
-
-  it("treats missing/non-object params as empty params", () => {
-    const a = `<<chip:{"action":"navigate-to-card","label":"Go"}>>`
-    const b = `<<chip:{"action":"navigate-to-card","label":"Go","params":[]}>>`
-    expect(parseChipsFromMessage(a)[0].params).toEqual({})
-    expect(parseChipsFromMessage(b)[0].params).toEqual({})
-  })
-
-  it("survives nested braces inside params via lazy regex match", () => {
-    // The lazy `\{[^]*?\}` matches the first balanced-looking chunk;
-    // valid JSON with nested object should still parse because the
-    // sentinel terminator is `>>`, not `}`.
-    const msg = `<<chip:{"action":"spawn-worker","label":"Spawn","params":{"prompt":"do {x}","planStepId":"step-y"}}>>`
-    const chips = parseChipsFromMessage(msg)
-    expect(chips).toHaveLength(1)
-    expect((chips[0].params as { prompt: string }).prompt).toBe("do {x}")
+  it("handles chips inline with prose around them", () => {
+    const msg = `Done with the review. <<chip:Approve>> or <<chip:Send back for revision>> — your call.`
+    expect(parseChipsFromMessage(msg).map((c) => c.label)).toEqual([
+      "Approve",
+      "Send back for revision",
+    ])
   })
 })
 
 describe("stripChipSentinels", () => {
   it("removes the sentinel from the rendered body", () => {
-    const msg = `Hi.\n\n<<chip:{"action":"mark-step-covered","label":"Mark covered","params":{"planStepId":"x"}}>>\n\nMore text.`
+    const msg = `Hi.\n\n<<chip:Approve Phase 2>>\n\nMore text.`
     const stripped = stripChipSentinels(msg)
     expect(stripped).not.toContain("<<chip")
     expect(stripped).toContain("Hi.")
@@ -101,34 +80,18 @@ describe("stripChipSentinels", () => {
   })
 
   it("collapses 3+ blank lines that the strip created back to a paragraph break", () => {
-    const msg = `One.\n\n<<chip:{"action":"mark-step-covered","label":"x","params":{}}>>\n\nTwo.`
+    const msg = `One.\n\n<<chip:x>>\n\nTwo.`
     expect(stripChipSentinels(msg)).toBe("One.\n\nTwo.")
+  })
+
+  it("strips multiple chips at once", () => {
+    const msg = `<<chip:A>> and <<chip:B>> and <<chip:C>> done.`
+    expect(stripChipSentinels(msg)).toBe("and  and  done.")
   })
 
   it("is a no-op for empty / non-string", () => {
     expect(stripChipSentinels("")).toBe("")
     // @ts-expect-error intentional bad input
     expect(stripChipSentinels(null)).toBe(null)
-  })
-})
-
-describe("isKnownChipActionId", () => {
-  it("accepts every registered action id", () => {
-    const ids = [
-      "approve-phase-2",
-      "view-deliverable",
-      "mark-step-covered",
-      "mark-step-skipped",
-      "spawn-worker",
-      "send-to-agent",
-      "navigate-to-card",
-      "mark-worker-done",
-    ]
-    for (const id of ids) expect(isKnownChipActionId(id)).toBe(true)
-  })
-
-  it("rejects unknown ids", () => {
-    expect(isKnownChipActionId("rm-rf")).toBe(false)
-    expect(isKnownChipActionId("")).toBe(false)
   })
 })
