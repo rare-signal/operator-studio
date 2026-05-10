@@ -129,6 +129,48 @@ describe("parseChipsFromMessage", () => {
   it("drops chips with empty label even when a description is provided", () => {
     expect(parseChipsFromMessage(`<<chip:|just context>>`)).toEqual([])
   })
+
+  // 2026-05-10 forgiving form: workers occasionally emit
+  // `<<chip:LABEL>>|description` (description outside the sentinel)
+  // instead of the canonical `<<chip:LABEL|description>>`. The parser
+  // accepts both so a small syntax slip doesn't strand the chip as
+  // raw text in the rendered message.
+  it("parses outside-sentinel description form `<<chip:LABEL>>|DESC`", () => {
+    const msg = `<<chip:Mark worker done>>|Berthier should run os:worker-done after eyeballing the diff`
+    expect(parseChipsFromMessage(msg)).toEqual([
+      {
+        label: "Mark worker done",
+        description:
+          "Berthier should run os:worker-done after eyeballing the diff",
+        index: 0,
+      },
+    ])
+  })
+
+  it("when both inside and outside descriptions are present, inside wins (canonical)", () => {
+    const msg = `<<chip:Approve|inside form wins>>|outside form ignored`
+    expect(parseChipsFromMessage(msg)[0].description).toBe("inside form wins")
+  })
+
+  it("parses multiple chips mixing both inside and outside description forms", () => {
+    const msg = [
+      "<<chip:Inside form|inside desc here>>",
+      "<<chip:Outside form>>|outside desc here",
+      "<<chip:No desc>>",
+    ].join("\n")
+    const chips = parseChipsFromMessage(msg)
+    expect(chips).toHaveLength(3)
+    expect(chips[0]).toMatchObject({
+      label: "Inside form",
+      description: "inside desc here",
+    })
+    expect(chips[1]).toMatchObject({
+      label: "Outside form",
+      description: "outside desc here",
+    })
+    expect(chips[2]).toMatchObject({ label: "No desc" })
+    expect(chips[2].description).toBeUndefined()
+  })
 })
 
 describe("stripChipSentinels", () => {

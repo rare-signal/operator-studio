@@ -53,16 +53,24 @@ export interface ChipInstance {
   index: number
 }
 
-/** Lazy match anchored to its own line — captures everything between
- *  `<<chip:` and the next `>>`, but only when the sentinel occupies a
- *  whole line (allowing surrounding whitespace). This prevents inline
- *  documentation like "Sentinel syntax: `<<chip:LABEL>>`" from being
- *  parsed as an actual chip. The `m` flag makes `^` / `$` match line
- *  boundaries; the `g` flag is required for `matchAll`.
+/** Lazy match anchored to its own line — captures the chip sentinel
+ *  AND an optional out-of-sentinel description (for tolerance: workers
+ *  occasionally emit `<<chip:LABEL>>|description` instead of the
+ *  canonical `<<chip:LABEL|description>>`; we accept both forms).
+ *
+ *  Captures:
+ *    m[1] = inside the sentinel (label, or `label|description` v2 form)
+ *    m[2] = optional out-of-sentinel description (the forgiving form)
+ *
+ *  Anchored to start/end of line (with optional whitespace) so that
+ *  inline documentation like "Sentinel syntax: `<<chip:LABEL>>`" is
+ *  NOT parsed as an actual chip. The `m` flag makes `^` / `$` match
+ *  line boundaries; the `g` flag is required for `matchAll`.
  *
  *  LLMs are responsible for putting each chip on its own line and for
  *  not embedding `>>` inside labels. */
-const CHIP_SENTINEL_RE = /^[ \t]*<<chip:(.*?)>>[ \t]*$/gm
+const CHIP_SENTINEL_RE =
+  /^[ \t]*<<chip:(.+?)>>(?:[ \t]*\|[ \t]*(.+?))?[ \t]*$/gm
 
 /**
  * Extract every chip from a message body. Empty labels drop silently.
@@ -74,17 +82,23 @@ export function parseChipsFromMessage(content: string): ChipInstance[] {
   let index = 0
   for (const m of content.matchAll(CHIP_SENTINEL_RE)) {
     const raw = m[1]
+    const outsideDesc = m[2]
     if (!raw) continue
     // Split on FIRST `|` only; subsequent pipes live literally inside
     // the description so URLs / pipe-using prose survive.
     const pipeAt = raw.indexOf("|")
     const labelRaw = pipeAt === -1 ? raw : raw.slice(0, pipeAt)
-    const descRaw = pipeAt === -1 ? undefined : raw.slice(pipeAt + 1)
+    const insideDesc = pipeAt === -1 ? undefined : raw.slice(pipeAt + 1)
     const label = labelRaw.trim()
     if (!label) continue
+    // Description lookup precedence: inside-sentinel form
+    // (`<<chip:LABEL|DESC>>` — canonical) wins over outside-sentinel
+    // form (`<<chip:LABEL>>|DESC` — tolerated for workers that emit
+    // the wrong syntax). Both normalize to trimmed text; empty
+    // strings normalize to undefined so the sparkle modal doesn't
+    // open over a blank card.
+    const descRaw = insideDesc ?? outsideDesc
     const description = descRaw?.trim()
-    // Empty description ("<<chip:A|>>") normalizes to undefined so the
-    // sparkle modal doesn't open over a blank card.
     out.push(
       description ? { label, description, index } : { label, index }
     )
