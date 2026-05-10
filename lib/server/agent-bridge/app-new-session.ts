@@ -235,19 +235,33 @@ export async function createNewAppSessionAndSend(
   // race the address bar of whatever browser tab fired this request.
   await new Promise((r) => setTimeout(r, 500))
 
-  // Switch Claude to bypass-permissions mode BEFORE the new chat is
-  // opened. Per David's 2026-05-09 finding: setting bypass mode in
-  // ANY chat propagates to ALL subsequent new chats opened in the
-  // same app session — only an app restart resets it. So firing
-  // Cmd+Shift+M + "5" against the currently-shown chat (which always
-  // exists when Claude is frontmost) puts the global mode on bypass,
-  // and the immediately-following Cmd+N opens a brand-new chat that
-  // INHERITS bypass mode without any further keystrokes.
+  const shortcut = await fireShortcut(adapter.newSessionShortcut)
+  if ("error" in shortcut) {
+    return {
+      ok: false,
+      appKind: args.appKind,
+      stage: "new-session-shortcut",
+      error: shortcut.error,
+      status: shortcut.status,
+    }
+  }
+  await new Promise((r) => setTimeout(r, adapter.postShortcutDelayMs))
+
+  // Switch the FRESHLY-OPENED new chat to bypass-permissions mode
+  // BEFORE pasting the prompt. This must happen AFTER Cmd+N (so the
+  // keystroke targets the new chat, not the previously-shown one) and
+  // BEFORE the paste (so the worker's first action sees bypass).
   //
-  // This ordering also dodges the post-picker focus problem we hit
-  // earlier: when the picker dismisses, focus might land somewhere
-  // unhelpful, BUT the next Cmd+N starts a fresh new chat with input
-  // focus by default — so the subsequent paste lands cleanly.
+  // Earlier attempts placed this BEFORE Cmd+N, relying on bypass
+  // propagating from one chat to all subsequent new chats in the app
+  // session. That works only when the user hasn't reset Claude's
+  // default mode for new threads. With the default reset to ask-
+  // permissions (the more common case for fresh app launches), the
+  // new chat ignores the previous chat's mode and starts at ask.
+  //
+  // Picker handling lives in setClaudeBypassPermissionMode — generous
+  // delays + Up x 5 (defensive ceiling-clamp) + Down x 4 to land on
+  // Bypass + Enter to confirm. ~3.5s total.
   //
   // Codex skipped (no equivalent picker). Failure is non-fatal —
   // worker still spawns at default permission level if anything goes
@@ -264,26 +278,12 @@ export async function createNewAppSessionAndSend(
         `[app-new-session] bypass-mode toggle failed: ${bypass.error}`
       )
     }
-    // Settle so the picker close animation doesn't race Cmd+N.
-    await new Promise((r) => setTimeout(r, 300))
   }
-
-  const shortcut = await fireShortcut(adapter.newSessionShortcut)
-  if ("error" in shortcut) {
-    return {
-      ok: false,
-      appKind: args.appKind,
-      stage: "new-session-shortcut",
-      error: shortcut.error,
-      status: shortcut.status,
-    }
-  }
-  await new Promise((r) => setTimeout(r, adapter.postShortcutDelayMs))
 
   // Reuse sendToApp for the paste + submit dance. The app is already
-  // frontmost and on a fresh chat (with bypass-permissions mode
-  // inherited from the global flip above, when enabled), so
-  // re-activating is harmless.
+  // frontmost and on a fresh chat (now with bypass-permissions mode
+  // set explicitly when enabled), so re-activating is harmless and
+  // helps restore focus to the chat input after the picker dismissed.
   const sent = await sendToApp({
     app: appName,
     text: prompt,

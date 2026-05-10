@@ -139,41 +139,54 @@ const KEY_SCRIPTS: Record<string, string> = {
  *
  * Per claude-code-guide research (2026-05-09): Claude Desktop has no
  * settings.json knob, no slash command, and no launch flag for this.
- * The only way is the Cmd+Shift+M permission-mode picker. David has
- * dismissed the "are you sure?" confirmation so the picker selection
- * is single-keystroke now.
+ * The only way is the Cmd+Shift+M permission-mode picker.
  *
- * **Persistence finding (David, 2026-05-09):** setting bypass mode
- * in ANY chat propagates to ALL subsequent new chats in the same app
- * session — only an app restart resets it. The spawn pipeline
- * exploits this: it flips bypass on the currently-shown chat BEFORE
- * Cmd+N, so the new chat created by Cmd+N inherits bypass mode
- * automatically and we don't have to fight the post-picker focus
- * problem (Cmd+N gives a fresh chat with input focus by default).
+ * **Persistence finding (David, 2026-05-09):** setting bypass mode in
+ * ANY chat in the app propagates to ALL subsequent new chats in the
+ * same app session — only an app restart resets it. The spawn
+ * pipeline exploits this by flipping bypass on the currently-shown
+ * chat BEFORE Cmd+N, so the new chat inherits.
  *
- * Best-effort: returns ok:false on failure but the caller is expected
- * to log + continue — failing the whole spawn over a permission-mode
- * toggle would be worse than landing in default mode. Adds ~400ms to
- * the spawn pipeline (300ms for the picker to render + 100ms settle
- * after the index keystroke).
+ * **Bulletproof navigation (David, 2026-05-10):** earlier attempts
+ * pressed the "5" key alone after Cmd+Shift+M (the badge next to
+ * "Bypass permissions" reads "5"), but the picker either ignored the
+ * single-key shortcut OR ate it because the picker animation hadn't
+ * finished rendering. We now use defensive arrow navigation:
+ *
+ *   1. Wait a full second after Cmd+Shift+M for the picker to fully
+ *      render and start accepting keystrokes (300ms was empirically
+ *      too tight; arrows fired at 300ms had their first keystroke
+ *      eaten and landed off-by-one on Auto mode instead of Bypass).
+ *   2. Press Up arrow several times. Up arrows hit a ceiling and stop
+ *      — so even if the picker started highlighted on a non-top item,
+ *      enough Ups guarantees we're on item 1 (Ask permissions).
+ *   3. Press Down arrow exactly four times to navigate from item 1
+ *      (Ask permissions) → item 5 (Bypass permissions). 200ms between
+ *      keystrokes to give the highlight time to advance and the
+ *      picker time to register each one.
+ *   4. Press Enter to confirm the selection and dismiss the picker.
+ *   5. Settle 500ms before returning so the picker dismissal animation
+ *      + focus restore have completed.
+ *
+ * Total cost: ~3.0s of keystroke + delay time. Generous on purpose —
+ * David asked for bulletproof over fast.
+ *
+ * Best-effort: returns ok:false on AppleScript failure but the caller
+ * is expected to log + continue — failing the whole spawn over a
+ * permission-mode toggle would be worse than landing in default mode.
  *
  * Caller MUST have already activated Claude Desktop. Runs against
  * whatever chat is currently shown — if Claude lost focus, the
  * keystrokes go elsewhere.
  *
- * If Claude Desktop's picker layout changes (the "5" stops being
- * Bypass permissions), this silently sets the wrong mode — we have
- * no way to verify without a visual check.
+ * If Claude Desktop's picker order changes (Bypass moves out of the
+ * 5th position), this silently sets the wrong mode — we have no way
+ * to verify without a visual check. Five modes today: Ask permissions
+ * / Accept edits / Plan mode / Auto mode / Bypass permissions.
  */
-const PERMISSION_MODE_BYPASS_PICKER_INDEX = "5"
-
 export async function setClaudeBypassPermissionMode(): Promise<
-  { ok: true; refocused: boolean } | { ok: false; error: string }
+  { ok: true } | { ok: false; error: string }
 > {
-  // Step 1: Cmd+Shift+M opens the permission-mode picker; "5" picks
-  // "Bypass permissions" and dismisses the picker. David verified
-  // this part works on 2026-05-09 — the dropdown lands on the right
-  // mode.
   const toggle = await runCommand(
     "osascript",
     [
@@ -182,13 +195,80 @@ export async function setClaudeBypassPermissionMode(): Promise<
       "-e",
       `  keystroke "m" using {command down, shift down}`,
       "-e",
-      `  delay 0.3`,
+      `  delay 1.0`, // wait for picker to fully render + accept input
+      // Defensive: go to top. Up arrows stop at item 1 (no wrap), so
+      // overshooting is safe and guarantees a known starting position.
       "-e",
-      `  keystroke "${PERMISSION_MODE_BYPASS_PICKER_INDEX}"`,
+      `  key code 126`, // Up
+      "-e",
+      `  delay 0.15`,
+      "-e",
+      `  key code 126`,
+      "-e",
+      `  delay 0.15`,
+      "-e",
+      `  key code 126`,
+      "-e",
+      `  delay 0.15`,
+      "-e",
+      `  key code 126`,
+      "-e",
+      `  delay 0.15`,
+      "-e",
+      `  key code 126`, // 5 Ups total — guarantees we're on item 1 in a 5-item picker
+      "-e",
+      `  delay 0.25`,
+      // Now down exactly 4 from item 1 to land on item 5 (Bypass).
+      "-e",
+      `  key code 125`, // Down
+      "-e",
+      `  delay 0.2`,
+      "-e",
+      `  key code 125`,
+      "-e",
+      `  delay 0.2`,
+      "-e",
+      `  key code 125`,
+      "-e",
+      `  delay 0.2`,
+      "-e",
+      `  key code 125`,
+      "-e",
+      `  delay 0.25`,
+      "-e",
+      `  keystroke return`, // confirm Bypass selection in the picker
+      "-e",
+      `  delay 0.6`, // let any "are you sure" confirmation dialog appear
+      "-e",
+      `  keystroke return`, // press default button on confirmation dialog (= Confirm); harmless newline if no dialog
+      "-e",
+      `  delay 0.5`, // let the dialog close + focus state settle
+      // After bypass is set, focus does NOT return to the chat input
+      // — David verified this. We have to explicitly click into the
+      // composer area or the subsequent sendToApp paste lands in the
+      // wrong place and no JSONL gets created. Click 80px above the
+      // window's bottom edge, horizontally centered — that's reliably
+      // inside Claude Desktop's composer regardless of window size.
+      "-e",
+      `  tell process "Claude"`,
+      "-e",
+      `    set fp to position of front window`,
+      "-e",
+      `    set fs to size of front window`,
+      "-e",
+      `    set clickX to (item 1 of fp) + ((item 1 of fs) / 2)`,
+      "-e",
+      `    set clickY to (item 2 of fp) + (item 2 of fs) - 80`,
+      "-e",
+      `    click at {clickX, clickY}`,
+      "-e",
+      `  end tell`,
+      "-e",
+      `  delay 0.3`, // let the click register + cursor land in input
       "-e",
       `end tell`,
     ],
-    { timeoutMs: 3000 }
+    { timeoutMs: 8000 }
   )
   if (toggle.code !== 0) {
     return {
@@ -198,17 +278,10 @@ export async function setClaudeBypassPermissionMode(): Promise<
       } — Accessibility permission needed.`,
     }
   }
-
-  // Step 2: We tried two refocus approaches that didn't help —
-  // AX-text-area lookup (Claude doesn't expose its input as a standard
-  // text area) and a coordinate click at bottom-center (still no
-  // JSONL appeared after spawn). Skipping refocus entirely now; the
-  // sendToApp call that follows will re-activate Claude, which on
-  // recent attempts seems to be enough to land the paste in the input
-  // when David verifies. If the spawn still misses, we'll re-add a
-  // refocus path with a different mechanism.
-  await new Promise((r) => setTimeout(r, 200))
-  return { ok: true, refocused: false }
+  // JS-side settle so picker dismiss animation + focus restore finish
+  // before the caller's next action (Cmd+N or paste).
+  await new Promise((r) => setTimeout(r, 500))
+  return { ok: true }
 }
 
 export interface SendToAppArgs {
