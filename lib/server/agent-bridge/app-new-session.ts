@@ -235,6 +235,39 @@ export async function createNewAppSessionAndSend(
   // race the address bar of whatever browser tab fired this request.
   await new Promise((r) => setTimeout(r, 500))
 
+  // Switch Claude to bypass-permissions mode BEFORE the new chat is
+  // opened. Per David's 2026-05-09 finding: setting bypass mode in
+  // ANY chat propagates to ALL subsequent new chats opened in the
+  // same app session — only an app restart resets it. So firing
+  // Cmd+Shift+M + "5" against the currently-shown chat (which always
+  // exists when Claude is frontmost) puts the global mode on bypass,
+  // and the immediately-following Cmd+N opens a brand-new chat that
+  // INHERITS bypass mode without any further keystrokes.
+  //
+  // This ordering also dodges the post-picker focus problem we hit
+  // earlier: when the picker dismisses, focus might land somewhere
+  // unhelpful, BUT the next Cmd+N starts a fresh new chat with input
+  // focus by default — so the subsequent paste lands cleanly.
+  //
+  // Codex skipped (no equivalent picker). Failure is non-fatal —
+  // worker still spawns at default permission level if anything goes
+  // wrong; David babysits prompts in that case.
+  //
+  // Set OPERATOR_STUDIO_AUTO_BYPASS=0 to disable.
+  if (
+    args.appKind === "claude" &&
+    process.env.OPERATOR_STUDIO_AUTO_BYPASS !== "0"
+  ) {
+    const bypass = await setClaudeBypassPermissionMode()
+    if (!bypass.ok) {
+      console.warn(
+        `[app-new-session] bypass-mode toggle failed: ${bypass.error}`
+      )
+    }
+    // Settle so the picker close animation doesn't race Cmd+N.
+    await new Promise((r) => setTimeout(r, 300))
+  }
+
   const shortcut = await fireShortcut(adapter.newSessionShortcut)
   if ("error" in shortcut) {
     return {
@@ -247,44 +280,10 @@ export async function createNewAppSessionAndSend(
   }
   await new Promise((r) => setTimeout(r, adapter.postShortcutDelayMs))
 
-  // Switch the freshly-opened Claude session to bypass-permissions
-  // mode BEFORE the kickoff prompt is pasted, so the worker's first
-  // action doesn't hit a permission UI gate.
-  //
-  // Cmd+Shift+M + "5" picks bypass and dismisses the picker — David
-  // verified the dropdown lands correctly. Open question: whether the
-  // picker dismiss leaves focus in the right place for the subsequent
-  // paste; we tried two refocus paths (AX text-area lookup + bottom-
-  // center coordinate click) and the spawn still missed (no new JSONL
-  // appeared). Currently shipping WITHOUT a refocus; the sendToApp
-  // re-activate may be enough.
-  //
-  // Failure is non-fatal — the worker still spawns at default
-  // permission level if anything goes wrong. Codex skipped (no
-  // equivalent picker).
-  //
-  // GATED OFF BY DEFAULT until verified working. Set
-  // OPERATOR_STUDIO_AUTO_BYPASS=1 to enable.
-  if (
-    args.appKind === "claude" &&
-    process.env.OPERATOR_STUDIO_AUTO_BYPASS === "1"
-  ) {
-    const bypass = await setClaudeBypassPermissionMode()
-    if (!bypass.ok) {
-      console.warn(
-        `[app-new-session] bypass-mode toggle failed: ${bypass.error}`
-      )
-    } else if (!bypass.refocused) {
-      console.warn(
-        `[app-new-session] bypass-mode set but chat-input refocus didn't confirm`
-      )
-    }
-    // Settle so the picker close animation + refocus don't race the paste.
-    await new Promise((r) => setTimeout(r, 200))
-  }
-
   // Reuse sendToApp for the paste + submit dance. The app is already
-  // frontmost and on a fresh chat, so re-activating is harmless.
+  // frontmost and on a fresh chat (with bypass-permissions mode
+  // inherited from the global flip above, when enabled), so
+  // re-activating is harmless.
   const sent = await sendToApp({
     app: appName,
     text: prompt,

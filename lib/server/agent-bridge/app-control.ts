@@ -134,7 +134,7 @@ const KEY_SCRIPTS: Record<string, string> = {
 }
 
 /**
- * Switch the currently-active Claude Code Desktop session to
+ * Switch the currently-frontmost Claude Code Desktop session to
  * "Bypass permissions" mode via keystroke automation.
  *
  * Per claude-code-guide research (2026-05-09): Claude Desktop has no
@@ -143,16 +143,23 @@ const KEY_SCRIPTS: Record<string, string> = {
  * dismissed the "are you sure?" confirmation so the picker selection
  * is single-keystroke now.
  *
+ * **Persistence finding (David, 2026-05-09):** setting bypass mode
+ * in ANY chat propagates to ALL subsequent new chats in the same app
+ * session — only an app restart resets it. The spawn pipeline
+ * exploits this: it flips bypass on the currently-shown chat BEFORE
+ * Cmd+N, so the new chat created by Cmd+N inherits bypass mode
+ * automatically and we don't have to fight the post-picker focus
+ * problem (Cmd+N gives a fresh chat with input focus by default).
+ *
  * Best-effort: returns ok:false on failure but the caller is expected
  * to log + continue — failing the whole spawn over a permission-mode
  * toggle would be worse than landing in default mode. Adds ~400ms to
  * the spawn pipeline (300ms for the picker to render + 100ms settle
  * after the index keystroke).
  *
- * Caller MUST have already activated Claude Desktop and opened a new
- * chat window (post-Cmd+N + focus settle). Runs against whatever app
- * is currently frontmost — if Claude lost focus, the keystrokes go
- * elsewhere.
+ * Caller MUST have already activated Claude Desktop. Runs against
+ * whatever chat is currently shown — if Claude lost focus, the
+ * keystrokes go elsewhere.
  *
  * If Claude Desktop's picker layout changes (the "5" stops being
  * Bypass permissions), this silently sets the wrong mode — we have
