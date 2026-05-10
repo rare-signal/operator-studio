@@ -249,11 +249,20 @@ export async function createNewAppSessionAndSend(
 
   // Best-effort: switch the freshly-opened Claude session to
   // bypass-permissions mode BEFORE the kickoff prompt is pasted, so
-  // the worker's first action doesn't hit a permission UI gate. This
-  // adds ~400ms to the spawn pipeline. Failure is non-fatal — the
-  // worker still spawns, just at default permission level. Codex
-  // doesn't have an equivalent picker so we skip it there.
-  if (args.appKind === "claude") {
+  // the worker's first action doesn't hit a permission UI gate.
+  //
+  // GATED ON ENV VAR. The naive Cmd+Shift+M + "5" sequence broke the
+  // spawn pipeline twice on 2026-05-09 — the picker likely waits for
+  // Enter after the index keystroke, so the subsequent paste landed
+  // in the picker filter instead of the chat input and the new chat
+  // never received the prompt. Set OPERATOR_STUDIO_AUTO_BYPASS=1 to
+  // re-enable for live debugging once we have the right keystroke
+  // sequence figured out (probably "5" + Enter, or arrow-down x 4 +
+  // Enter, or a different shortcut entirely).
+  if (
+    args.appKind === "claude" &&
+    process.env.OPERATOR_STUDIO_AUTO_BYPASS === "1"
+  ) {
     const bypass = await setClaudeBypassPermissionMode()
     if (!bypass.ok) {
       console.warn(
