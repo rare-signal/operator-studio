@@ -42,9 +42,16 @@ export interface ChipInstance {
   index: number
 }
 
-/** Lazy match — captures everything between `<<chip:` and the next `>>`.
- *  LLMs are responsible for not embedding `>>` in labels. */
-const CHIP_SENTINEL_RE = /<<chip:(.*?)>>/g
+/** Lazy match anchored to its own line — captures everything between
+ *  `<<chip:` and the next `>>`, but only when the sentinel occupies a
+ *  whole line (allowing surrounding whitespace). This prevents inline
+ *  documentation like "Sentinel syntax: `<<chip:LABEL>>`" from being
+ *  parsed as an actual chip. The `m` flag makes `^` / `$` match line
+ *  boundaries; the `g` flag is required for `matchAll`.
+ *
+ *  LLMs are responsible for putting each chip on its own line and for
+ *  not embedding `>>` inside labels. */
+const CHIP_SENTINEL_RE = /^[ \t]*<<chip:(.*?)>>[ \t]*$/gm
 
 /**
  * Extract every chip from a message body. Empty labels drop silently.

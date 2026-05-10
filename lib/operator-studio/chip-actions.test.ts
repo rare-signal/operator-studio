@@ -20,8 +20,8 @@ describe("parseChipsFromMessage", () => {
     expect(parseChipsFromMessage(undefined)).toEqual([])
   })
 
-  it("extracts a single chip", () => {
-    const msg = `Phase 1 done. <<chip:Approve Phase 2 for Worker 1>>`
+  it("extracts a single chip on its own line", () => {
+    const msg = `Phase 1 done.\n<<chip:Approve Phase 2 for Worker 1>>`
     expect(parseChipsFromMessage(msg)).toEqual([
       { label: "Approve Phase 2 for Worker 1", index: 0 },
     ])
@@ -61,12 +61,27 @@ describe("parseChipsFromMessage", () => {
     )
   })
 
-  it("handles chips inline with prose around them", () => {
-    const msg = `Done with the review. <<chip:Approve>> or <<chip:Send back for revision>> — your call.`
-    expect(parseChipsFromMessage(msg).map((c) => c.label)).toEqual([
-      "Approve",
-      "Send back for revision",
+  it("does NOT match chips inline in prose (must be on their own line)", () => {
+    // This is the regression case from the 2026-05-09 cockpit smoke
+    // test: documentation like "Sentinel syntax: `<<chip:LABEL>>`" was
+    // being parsed as a real chip. Chips must be on their own line.
+    const inline = `Done with the review. <<chip:Approve>> or <<chip:Send back for revision>> — your call.`
+    expect(parseChipsFromMessage(inline)).toEqual([])
+    const docProse = "The sentinel syntax is `<<chip:LABEL>>` — read the brief."
+    expect(parseChipsFromMessage(docProse)).toEqual([])
+    const codeFence = "```\n<<chip:Example>>\n```"
+    // Code-fenced chips DO still match; the regex is line-anchored,
+    // not fence-aware. Authors should not put real chip syntax in code
+    // examples; if this becomes a problem we'd need a markdown-aware
+    // pre-pass. Documenting the current behavior:
+    expect(parseChipsFromMessage(codeFence).map((c) => c.label)).toEqual([
+      "Example",
     ])
+  })
+
+  it("matches chips on their own line, with optional surrounding whitespace", () => {
+    const msg = ["Three options:", "  <<chip:A>>  ", "<<chip:B>>", "\t<<chip:C>>\t"].join("\n")
+    expect(parseChipsFromMessage(msg).map((c) => c.label)).toEqual(["A", "B", "C"])
   })
 })
 
@@ -84,9 +99,18 @@ describe("stripChipSentinels", () => {
     expect(stripChipSentinels(msg)).toBe("One.\n\nTwo.")
   })
 
-  it("strips multiple chips at once", () => {
-    const msg = `<<chip:A>> and <<chip:B>> and <<chip:C>> done.`
-    expect(stripChipSentinels(msg)).toBe("and  and  done.")
+  it("strips multiple chips on their own lines", () => {
+    const msg = `Done.\n<<chip:A>>\n<<chip:B>>\n<<chip:C>>`
+    expect(stripChipSentinels(msg)).toBe("Done.")
+  })
+
+  it("does NOT strip inline-prose chips (parser doesn't match them either)", () => {
+    const msg = "The sentinel `<<chip:LABEL>>` is documented here."
+    // strip is line-anchored same as parser, so inline references survive.
+    // This keeps documentation about chip syntax readable in chat.
+    expect(stripChipSentinels(msg)).toBe(
+      "The sentinel `<<chip:LABEL>>` is documented here."
+    )
   })
 
   it("is a no-op for empty / non-string", () => {

@@ -84,6 +84,10 @@ There are two other active workers spawned by the same exec (\`${EXEC_AGENT_ID}\
 
 You don't need to coordinate with them directly — Berthier is the convergence point. But if your proposed UX touches \`step-os-cross-platform-parity\` (e.g. cancel UI must work on Win/Linux too), flag it in the field report.
 
+## Chip emission contract
+
+When you finish a substantive turn (a deliverable, a status, a decision point), end with **up to three** \`<<chip:...>>\` lines representing the most likely next user messages — concrete, self-contained, ready-to-send. Each \`<<chip:...>>\` should be its own line. The LABEL inside the sentinel is the literal text that will become the user's next message when they tap the chip, so write it as a complete request the receiving agent can act on without further context. Skip chips entirely if no clear next-action stands out.
+
 ## Provenance
 
 You were spawned by exec \`${EXEC_AGENT_ID}\` against plan card \`${PLAN_STEP_ID}\`. The cockpit watches for \`task_done\` to surface your completion.`

@@ -63,6 +63,10 @@ const KICKOFF_PROMPT = `You are a Claude worker spawned by the Operator Studio c
 - \`memory/feedback_no_browser_or_curl_verification.md\` — no preview, no curl, run \`pnpm typecheck\` instead.
 - \`memory/project_no_clis_only_desktop.md\` — David uses Desktop apps exclusively (you are spawned in Claude Code Desktop).
 
+## Chip emission contract
+
+When you finish a substantive turn (a deliverable, a status, a decision point), end with **up to three** \`<<chip:...>>\` lines representing the most likely next user messages — concrete, self-contained, ready-to-send. Each \`<<chip:...>>\` should be its own line. The LABEL inside the sentinel is the literal text that will become the user's next message when they tap the chip, so write it as a complete request the receiving agent can act on without further context. Skip chips entirely if no clear next-action stands out.
+
 ## Provenance
 
 You were spawned by exec \`${EXEC_AGENT_ID}\` against plan card \`${PLAN_STEP_ID}\`. The cockpit watches for \`task_done\` to surface your completion.`
