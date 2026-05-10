@@ -49,6 +49,10 @@ interface Options {
   /** Cards updated more recently than this are skipped from
    *  "no agent" nags. Default 15 minutes. */
   freshnessSkipMs: number
+  /** Display only the top N proposals (after priority sort). 0 = no cap. */
+  top: number
+  /** Suppress the SKIPPED CARDS section in text output. */
+  hideSkipped: boolean
 }
 
 interface ProposedAction {
@@ -76,6 +80,14 @@ interface ProposedAction {
    *  (only meaningful if alreadyOpen). */
   gateNote: string | null
   evidence: string
+  /** Higher = more leveraged executive next move. Sort key for the
+   *  text renderer + the `--top=N` cap. Score table is in
+   *  `priorityScoreFor()`. */
+  priorityScore: number
+  /** Short one-line action hint suitable for "NEXT MOVE" rendering
+   *  (e.g. "approve + execute via UI", "verify done signal then mark
+   *  covered"). */
+  nextMoveHint: string
 }
 
 interface SkippedCard {
@@ -224,13 +236,19 @@ function parseArgs(argv: string[]): Options {
     policy: false,
     includeParents: false,
     freshnessSkipMs: DEFAULT_FRESHNESS_SKIP_MS,
+    top: 0,
+    hideSkipped: false,
   }
   for (const arg of argv) {
     if (arg === "--dry-run") opts.dryRun = true
     else if (arg === "--json") opts.json = true
     else if (arg === "--policy") opts.policy = true
     else if (arg === "--include-parents") opts.includeParents = true
-    else if (arg.startsWith("--freshness-skip-ms=")) {
+    else if (arg === "--hide-skipped") opts.hideSkipped = true
+    else if (arg.startsWith("--top=")) {
+      const n = Number(arg.slice("--top=".length))
+      if (Number.isFinite(n) && n >= 0) opts.top = Math.floor(n)
+    } else if (arg.startsWith("--freshness-skip-ms=")) {
       const n = Number(arg.slice("--freshness-skip-ms=".length))
       if (Number.isFinite(n) && n >= 0) opts.freshnessSkipMs = n
     } else if (arg.startsWith("--workspace=")) opts.workspaceId = arg.slice("--workspace=".length)
@@ -257,6 +275,8 @@ function printUsage(): void {
       "  --policy                  print the autonomy policy ladder and exit",
       "  --include-parents         include parent/orchestration cards in heuristics",
       "  --freshness-skip-ms=MS    skip nag for cards updated within MS (default 900000 = 15m)",
+      "  --top=N                   show only the top N proposals (after priority sort)",
+      "  --hide-skipped            suppress the SKIPPED CARDS section",
       "  --workspace=ID            default: global",
     ].join("\n")
   )
@@ -275,6 +295,41 @@ function fmtAge(ms: number): string {
 interface DecisionResult {
   proposed: ProposedAction[]
   skippedCards: SkippedCard[]
+}
+
+/**
+ * Score a proposed action for "executive next move" leverage.
+ *
+ * The cycle emits a flat list, but for an agent acting as executive
+ * (Codex picking the next thing to do), the question is "which one
+ * first?". Higher score = act on this sooner. The ranking follows the
+ * autonomy ladder's natural cadence:
+ *
+ *   approved-pointer (10)        — already approved, just execute
+ *   mark_covered    (8)          — landable closeout, ratify and clear
+ *   continue_worker (6)          — live but stuck, unblock with a nudge
+ *   long-stale review (4)        — relaunch/rescope decision
+ *   in-motion-without-agent (2)  — generic worker gap
+ *
+ * Ties broken by `risk` (low first → cheaper to execute).
+ */
+function priorityScoreFor(
+  sourceId: string,
+  kind: ExecutiveRecommendationKind
+): { score: number; hint: string } {
+  if (sourceId.startsWith("os:cycle:approved-launch-pointer:"))
+    return { score: 10, hint: "approved launch — execute via Operator Studio (hot mode required)" }
+  if (sourceId.startsWith("os:cycle:approved-continue-pointer:"))
+    return { score: 10, hint: "approved continuation — send via agent send route (hot mode required)" }
+  if (sourceId.startsWith("os:cycle:done-signal:"))
+    return { score: 8, hint: "verify the done signal, then mark covered" }
+  if (kind === "continue_worker")
+    return { score: 6, hint: "approve + send the nudge to the stale worker" }
+  if (sourceId.startsWith("os:cycle:long-stale-inmotion:"))
+    return { score: 4, hint: "relaunch, rescope into smaller cards, or close" }
+  if (sourceId.startsWith("os:cycle:in-motion-without-agent:"))
+    return { score: 2, hint: "approve a launch_worker recommendation or rescope" }
+  return { score: 1, hint: "review and decide" }
 }
 
 function decideActions(
@@ -312,7 +367,14 @@ function decideActions(
   function annotate(
     base: Omit<
       ProposedAction,
-      "alreadyOpen" | "existingId" | "existingStatus" | "gateNote" | "autonomyTier" | "autonomyAction"
+      | "alreadyOpen"
+      | "existingId"
+      | "existingStatus"
+      | "gateNote"
+      | "autonomyTier"
+      | "autonomyAction"
+      | "priorityScore"
+      | "nextMoveHint"
     >,
     matchKey: { card?: string | null; agent?: string | null; kind: ExecutiveRecommendationKind }
   ): ProposedAction {
@@ -329,6 +391,7 @@ function decideActions(
         ? `gate: ok (${gate.tier})`
         : `gate: ${gate.tier} → ${gate.reason}`
     }
+    const priority = priorityScoreFor(base.sourceId, base.kind)
     return {
       ...base,
       alreadyOpen: Boolean(match),
@@ -337,6 +400,8 @@ function decideActions(
       autonomyTier: action.tier,
       autonomyAction: action.id,
       gateNote,
+      priorityScore: priority.score,
+      nextMoveHint: priority.hint,
     }
   }
 
@@ -566,6 +631,16 @@ function decideActions(
     }
   }
 
+  const riskRank: Record<ExecutiveRecommendationRisk, number> = {
+    low: 0,
+    medium: 1,
+    high: 2,
+  }
+  proposed.sort((a, b) => {
+    if (b.priorityScore !== a.priorityScore) return b.priorityScore - a.priorityScore
+    return riskRank[a.risk] - riskRank[b.risk]
+  })
+
   return { proposed, skippedCards }
 }
 
@@ -629,6 +704,8 @@ async function runCycle(opts: Options): Promise<CycleReport> {
     includeParents: opts.includeParents,
     freshnessSkipMs: opts.freshnessSkipMs,
   })
+  // Writes always cover the full proposal set — `--top` only narrows
+  // the human-facing render so we don't silently drop persisted advice.
   const proposed = decision.proposed
 
   const written: CycleReport["written"] = []
@@ -709,7 +786,7 @@ function renderPolicy(): string {
   return lines.join("\n")
 }
 
-function renderText(report: CycleReport): string {
+function renderText(report: CycleReport, opts: Pick<Options, "top" | "hideSkipped">): string {
   const lines: string[] = []
   lines.push(
     `os:cycle · ${report.fetchedAt} · workspace=${report.workspaceId} · ${report.dryRun ? "DRY-RUN" : "WRITES"} · took ${report.tookMs}ms (snapshot ${report.snapshotMs}ms)`
@@ -718,13 +795,29 @@ function renderText(report: CycleReport): string {
   if (report.proposed.length === 0) {
     lines.push("no proposed actions.")
   } else {
-    lines.push(`PROPOSED ACTIONS (${report.proposed.length}):`)
-    for (const a of report.proposed) {
+    // NEXT MOVE — single highest-leverage proposal, condensed for an
+    // executive (Codex / David) deciding what to act on first.
+    const top = report.proposed[0]
+    lines.push("NEXT MOVE:")
+    lines.push(`  ${top.kind} · ${top.title}  [score=${top.priorityScore} risk=${top.risk}]`)
+    if (top.planStepId) lines.push(`  card: ${top.planStepId}`)
+    if (top.agentId) lines.push(`  agent: ${top.agentId}`)
+    lines.push(`  do: ${top.nextMoveHint}`)
+    if (top.alreadyOpen)
+      lines.push(`  rec: ${top.existingId} (status=${top.existingStatus})`)
+    lines.push("")
+    const cap = opts.top > 0 ? Math.min(opts.top, report.proposed.length) : report.proposed.length
+    const shown = report.proposed.slice(0, cap)
+    const hidden = report.proposed.length - shown.length
+    lines.push(
+      `PROPOSED ACTIONS (${report.proposed.length}${hidden > 0 ? ` · showing top ${cap}` : ""}):`
+    )
+    for (const a of shown) {
       const dedupe = a.alreadyOpen
         ? `· already-open=${a.existingId} status=${a.existingStatus}`
         : "· new"
       lines.push(
-        `  [${a.autonomyTier}] ${a.kind} · risk=${a.risk}  ${dedupe}`
+        `  [${a.autonomyTier}] ${a.kind} · risk=${a.risk} · score=${a.priorityScore}  ${dedupe}`
       )
       lines.push(`    ${a.title}`)
       if (a.planStepId) lines.push(`    card: ${a.planStepId}`)
@@ -735,9 +828,12 @@ function renderText(report: CycleReport): string {
         lines.push(`    accept: ${a.acceptanceCriteria.slice(0, 200)}`)
       if (a.gateNote) lines.push(`    ${a.gateNote}`)
     }
+    if (hidden > 0) {
+      lines.push(`  … +${hidden} lower-priority proposal(s) not shown (use --top=0 to see all)`)
+    }
   }
   lines.push("")
-  if (report.skippedCards.length > 0) {
+  if (!opts.hideSkipped && report.skippedCards.length > 0) {
     const reasons = Object.entries(report.skippedCardsByReason)
       .map(([k, v]) => `${k}=${v}`)
       .join(" ")
@@ -773,7 +869,7 @@ async function main(): Promise<void> {
   if (opts.json) {
     console.log(JSON.stringify(report, null, 2))
   } else {
-    console.log(renderText(report))
+    console.log(renderText(report, { top: opts.top, hideSkipped: opts.hideSkipped }))
   }
 }
 

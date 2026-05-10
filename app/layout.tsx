@@ -22,6 +22,14 @@ export const viewport: Viewport = {
   // bottom composer (Send + Submit) get clipped under the notch / home
   // indicator and become unacceptable for tapping.
   viewportFit: "cover",
+  // iOS Safari: when the on-screen keyboard opens, by default the
+  // layout viewport stays the full screen height and the visual
+  // viewport shrinks behind the keyboard — so anything pinned to the
+  // bottom of `100dvh` "rubber bands" behind the keyboard. Setting
+  // `resizes-content` tells iOS to resize the layout viewport too,
+  // so dvh actually means "visible area" and the composer's Send
+  // button is reachable above the keyboard.
+  interactiveWidget: "resizes-content",
 }
 
 export default function RootLayout({

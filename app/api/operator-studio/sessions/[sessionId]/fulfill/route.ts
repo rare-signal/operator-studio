@@ -4,6 +4,7 @@ import { z } from "zod"
 import { authorizeRequest, getDisplayName } from "@/lib/operator-studio/auth"
 import {
   getFulfillmentsForSession,
+  getPassageById,
   getSessionById,
   promoteToStep,
   unpromoteFromStep,
@@ -14,7 +15,7 @@ export const dynamic = "force-dynamic"
 
 const promoteSchema = z.object({
   stepId: z.string().trim().min(1),
-  targetType: z.enum(["thread", "message"]),
+  targetType: z.enum(["thread", "message", "passage"]),
   targetId: z.string().trim().min(1),
   note: z.string().trim().max(2048).optional(),
 })
@@ -70,6 +71,17 @@ export async function POST(
       { error: `Step "${parsed.data.stepId}" isn't in this session's plan` },
       { status: 400 }
     )
+  }
+
+  // Validate passage targets up-front so an unknown id can't fake coverage.
+  if (parsed.data.targetType === "passage") {
+    const passage = await getPassageById(workspaceId, parsed.data.targetId)
+    if (!passage) {
+      return NextResponse.json(
+        { error: "Passage not found in this workspace" },
+        { status: 404 }
+      )
+    }
   }
 
   const promotedBy =

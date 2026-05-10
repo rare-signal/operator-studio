@@ -4,6 +4,11 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
 import { ingestInboxEvent } from "@/lib/operator-studio/inbox"
+import {
+  persistAdoTick,
+  type AdoCommentSnapshot,
+  type AdoItemSnapshot,
+} from "@/lib/operator-studio/ingest/ado-read-model"
 
 const execFileAsync = promisify(execFile)
 
@@ -59,6 +64,17 @@ export interface PollAdoResult {
    *  flow). */
   commentsIngested: number
   commentsSkippedDuplicate: number
+  /** L1 read-model: id of the ingest_snapshots row written this tick.
+   *  Null when L1 persist itself failed (errors[] will explain). */
+  snapshotId: string | null
+  /** L1 read-model: ado_items rows inserted or rev-bumped. */
+  itemsUpserted: number
+  /** L1 read-model: ado_revisions rows appended. */
+  revisionsAppended: number
+  /** L1 read-model: ado_comments rows appended. */
+  l1CommentsAppended: number
+  /** Whether this tick was driven by a JSON fixture rather than az. */
+  fixtureMode: boolean
   errors: string[]
 }
 
@@ -75,6 +91,10 @@ export async function pollAdoForFactory(
   let commentsSkippedDuplicate = 0
   const pat = getAdoPat()
 
+  // L1 ingest: full project query, NOT @Me-scoped. The L1 read-model
+  // mirrors every IT-project work item so downstream lenses (David's
+  // queue, Micky's stakeholder thread, the triage report) can derive
+  // their own filters from a single source of truth.
   const wiql = [
     "SELECT",
     "  [System.Id],",
@@ -90,48 +110,64 @@ export async function pollAdoForFactory(
     "FROM WorkItems",
     "WHERE",
     `  [System.TeamProject] = '${PROJECT}'`,
-    "  AND [System.AssignedTo] = @Me",
     "ORDER BY [System.ChangedDate] DESC",
   ].join(" ")
 
+  // Fixture mode: when ADO_INGEST_FIXTURE points at a JSON file, the
+  // poller reads it instead of shelling out to `az`. Keeps the
+  // schema/poller path deterministic for tests and for environments
+  // without live credentials.
+  const fixturePath = process.env.ADO_INGEST_FIXTURE?.trim()
+  const fixtureMode = !!fixturePath
   let workItems: AdoWorkItem[] = []
-  try {
-    const { stdout } = await execFileAsync(
-      "az",
-      [
-        "boards",
-        "query",
-        "--organization",
-        ORGANIZATION,
-        "--project",
-        PROJECT,
-        "--wiql",
-        wiql,
-        "--output",
-        "json",
-      ],
-      { timeout: 30_000 }
-    )
-    const data = JSON.parse(stdout) as AdoQueryResponse | AdoWorkItem[]
-    workItems = Array.isArray(data) ? data : (data.workItems ?? [])
-  } catch (err) {
-    errors.push(
-      `az boards query failed: ${err instanceof Error ? err.message : String(err)}`
-    )
-    return {
-      factoryId,
-      pollStartedAt: startedAt.toISOString(),
-      pollFinishedAt: new Date().toISOString(),
-      itemsSeen: 0,
-      rowsIngested: 0,
-      rowsSkippedDuplicate: 0,
-      commentsIngested: 0,
-      commentsSkippedDuplicate: 0,
-      errors,
+
+  if (fixtureMode) {
+    try {
+      const { readFile } = await import("node:fs/promises")
+      const raw = await readFile(fixturePath as string, "utf8")
+      const parsed = JSON.parse(raw) as AdoQueryResponse | AdoWorkItem[]
+      workItems = Array.isArray(parsed) ? parsed : (parsed.workItems ?? [])
+    } catch (err) {
+      errors.push(
+        `fixture read failed (${fixturePath}): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  } else {
+    try {
+      const { stdout } = await execFileAsync(
+        "az",
+        [
+          "boards",
+          "query",
+          "--organization",
+          ORGANIZATION,
+          "--project",
+          PROJECT,
+          "--wiql",
+          wiql,
+          "--output",
+          "json",
+        ],
+        { timeout: 30_000 }
+      )
+      const data = JSON.parse(stdout) as AdoQueryResponse | AdoWorkItem[]
+      workItems = Array.isArray(data) ? data : (data.workItems ?? [])
+    } catch (err) {
+      // Don't early-return — we still want to write an
+      // ingest_snapshots row recording the failed tick.
+      errors.push(
+        `az boards query failed: ${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
 
   itemsSeen = workItems.length
+
+  // Build L1 read-model batches alongside the inbox writes. The inbox
+  // path remains unchanged so existing UI / SignalCandidate callers
+  // see no change in behavior.
+  const l1Items: AdoItemSnapshot[] = []
+  const l1Comments: AdoCommentSnapshot[] = []
 
   for (const item of workItems) {
     const f = item.fields
@@ -162,6 +198,21 @@ export async function pollAdoForFactory(
     ]
       .filter(Boolean)
       .join(" · ")
+
+    l1Items.push({
+      workItemId: id,
+      rev,
+      type: type || null,
+      title,
+      state: state || null,
+      priority: priority ? Number(priority) : null,
+      assignedTo: assignedTo || null,
+      assignedToUniqueName: identityUniqueName(f, "System.AssignedTo"),
+      createdBy: createdBy || null,
+      changedBy: changedBy || null,
+      changedAt,
+      fields: f,
+    })
 
     try {
       const before = await getInboxRowExists(
@@ -277,6 +328,15 @@ export async function pollAdoForFactory(
               relatedWorkId: String(id),
               relatedWorkLabel: `ADO #${id}`,
             })
+            l1Comments.push({
+              workItemId: id,
+              commentId,
+              createdBy: author,
+              createdAt: c.createdDate ? new Date(c.createdDate) : null,
+              modifiedAt: c.modifiedDate ? new Date(c.modifiedDate) : null,
+              bodyHtml,
+              bodyText,
+            })
             if (before) commentsSkippedDuplicate += 1
             else commentsIngested += 1
           }
@@ -289,15 +349,51 @@ export async function pollAdoForFactory(
     }
   }
 
+  const finishedAt = new Date()
+
+  // L1 read-model write — current state, append-only history, and
+  // an ingest_snapshots row for this tick. Best-effort: a DB
+  // failure here surfaces as an error string but does not crash
+  // the inbox-side success accounting.
+  let l1SnapshotId: string | null = null
+  let l1ItemsUpserted = 0
+  let l1RevisionsAppended = 0
+  let l1CommentsAppended = 0
+  try {
+    const r = await persistAdoTick({
+      workspaceId,
+      factoryId,
+      pollStartedAt: startedAt,
+      pollFinishedAt: finishedAt,
+      items: l1Items,
+      comments: l1Comments,
+      errors,
+      fixtureMode,
+    })
+    l1SnapshotId = r.snapshotId
+    l1ItemsUpserted = r.itemsUpserted
+    l1RevisionsAppended = r.revisionsAppended
+    l1CommentsAppended = r.commentsAppended
+  } catch (err) {
+    errors.push(
+      `L1 persist failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+
   return {
     factoryId,
     pollStartedAt: startedAt.toISOString(),
-    pollFinishedAt: new Date().toISOString(),
+    pollFinishedAt: finishedAt.toISOString(),
     itemsSeen,
     rowsIngested,
     rowsSkippedDuplicate,
     commentsIngested,
     commentsSkippedDuplicate,
+    snapshotId: l1SnapshotId,
+    itemsUpserted: l1ItemsUpserted,
+    revisionsAppended: l1RevisionsAppended,
+    l1CommentsAppended,
+    fixtureMode,
     errors,
   }
 }
@@ -352,6 +448,16 @@ function identityName(
   if (typeof ident.displayName === "string") return ident.displayName
   if (typeof ident.uniqueName === "string") return ident.uniqueName
   return ""
+}
+
+function identityUniqueName(
+  fields: Record<string, unknown>,
+  key: string
+): string | null {
+  const v = fields[key]
+  if (!v || typeof v !== "object") return null
+  const ident = v as { uniqueName?: unknown }
+  return typeof ident.uniqueName === "string" ? ident.uniqueName : null
 }
 
 // Lightweight existence check for ingest dedupe accounting. Cheaper

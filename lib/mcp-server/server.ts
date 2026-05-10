@@ -10,6 +10,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
+import { registerAdoLookupTools } from "./tools/ado-lookup.js"
 import { registerKnowledgeTools } from "./tools/knowledge.js"
 import { registerManifestTools } from "./tools/manifest.js"
 import { registerOutboxTools } from "./tools/outbox.js"
@@ -41,6 +42,7 @@ export function buildOperatorStudioMcpServer(ctx: McpContext): McpServer {
   registerWorkContextTools(server, ctx)
   registerOutboxTools(server, ctx)
   registerManifestTools(server, ctx)
+  registerAdoLookupTools(server, ctx)
 
   return server
 }

@@ -65,6 +65,10 @@ app/beta-remote/
 BETA_README.md
 .vercel
 
+# Operator Studio local runtime cache/recovery artifacts.
+.operator-studio/cache/
+.operator-studio/launch-attempts/
+
 # Experimental mockup surfaces — kept local for ideation, not committed.
 # `app/2/` is the older v2 sketch; `app/v3/` is the active vision-mockup
 # with its own /v3 route. Promote into the main shell when an idea is

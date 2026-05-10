@@ -29,6 +29,13 @@ async function main() {
       `comments_skipped_duplicate=${result.commentsSkippedDuplicate}  ` +
       `errors=${result.errors.length}`
   )
+  console.log(
+    `  L1: snapshot=${result.snapshotId ?? "(none)"} ` +
+      `items_upserted=${result.itemsUpserted} ` +
+      `revisions_appended=${result.revisionsAppended} ` +
+      `comments_appended=${result.l1CommentsAppended} ` +
+      `fixture_mode=${result.fixtureMode}`
+  )
   for (const e of result.errors) console.log(`  ! ${e}`)
   await getPgPool().end()
 }

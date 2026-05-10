@@ -29,6 +29,8 @@ export type ThreadBindingSource =
   | "tail-sniff"
   | "scheduled"
 
+export type SpawnOrigin = "cockpit" | "recommendation" | "manual"
+
 export interface ThreadCardBinding {
   id: string
   workspaceId: string
@@ -40,6 +42,8 @@ export interface ThreadCardBinding {
   confidence: number | null
   rationale: string | null
   sourceRecommendationId: string | null
+  spawnedByAgentId: string | null
+  spawnOrigin: string | null
   createdBy: string | null
   createdAt: string
   updatedAt: string
@@ -55,6 +59,11 @@ export interface UpsertThreadCardBindingInput {
   confidence?: number | null
   rationale?: string | null
   sourceRecommendationId?: string | null
+  /** Composite agent id of the executive that originated this spawn
+   *  (e.g. cockpit's pinned exec). Persists the parent → child linkage
+   *  so the cockpit can show authoritative spawned-by lists. */
+  spawnedByAgentId?: string | null
+  spawnOrigin?: SpawnOrigin | null
   createdBy?: string | null
 }
 
@@ -70,6 +79,8 @@ function rowToBinding(row: typeof operatorThreadCardBindings.$inferSelect): Thre
     confidence: row.confidence ?? null,
     rationale: row.rationale ?? null,
     sourceRecommendationId: row.sourceRecommendationId ?? null,
+    spawnedByAgentId: row.spawnedByAgentId ?? null,
+    spawnOrigin: row.spawnOrigin ?? null,
     createdBy: row.createdBy ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -126,6 +137,9 @@ export async function upsertThreadCardBinding(
           rationale: input.rationale ?? row.rationale ?? null,
           sourceRecommendationId:
             input.sourceRecommendationId ?? row.sourceRecommendationId ?? null,
+          spawnedByAgentId:
+            input.spawnedByAgentId ?? row.spawnedByAgentId ?? null,
+          spawnOrigin: input.spawnOrigin ?? row.spawnOrigin ?? null,
           planId: input.planId ?? row.planId ?? null,
           updatedAt: now,
         })
@@ -154,12 +168,37 @@ export async function upsertThreadCardBinding(
       confidence: input.confidence ?? null,
       rationale: input.rationale ?? null,
       sourceRecommendationId: input.sourceRecommendationId ?? null,
+      spawnedByAgentId: input.spawnedByAgentId ?? null,
+      spawnOrigin: input.spawnOrigin ?? null,
       createdBy: input.createdBy ?? null,
       createdAt: now,
       updatedAt: now,
     })
     .returning()
   return rowToBinding(inserted[0])
+}
+
+/**
+ * Active bindings spawned by a specific executive agent. Drives the
+ * cockpit's "workers spawned by exec" rail. Excludes detached rows.
+ */
+export async function getActiveBindingsSpawnedBy(
+  workspaceId: string,
+  spawnedByAgentId: string
+): Promise<ThreadCardBinding[]> {
+  const db = getDb()
+  const rows = await db
+    .select()
+    .from(operatorThreadCardBindings)
+    .where(
+      and(
+        eq(operatorThreadCardBindings.workspaceId, workspaceId),
+        eq(operatorThreadCardBindings.spawnedByAgentId, spawnedByAgentId),
+        isNull(operatorThreadCardBindings.detachedAt)
+      )
+    )
+    .orderBy(desc(operatorThreadCardBindings.createdAt))
+  return rows.map(rowToBinding)
 }
 
 /** All active (non-detached) bindings for a workspace. */

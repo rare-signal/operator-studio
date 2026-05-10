@@ -48,6 +48,14 @@ export interface AgentSnapshot {
   turns?: Turn[]
   fileMtime?: string
   pendingBytes?: number
+  liveness?: {
+    partialMode:
+      | "tmux-pane-text"
+      | "jsonl-line-buffered-codex"
+      | "jsonl-per-message"
+    partialUnavailable?: string
+    pendingBytes: number
+  }
 }
 
 export interface SendOutcome {

@@ -182,6 +182,24 @@ export async function sendToApp(args: SendToAppArgs): Promise<
     }
   }
 
+  // ── Universal Clipboard foot-gun guard ──
+  // pbcopy on the Mac auto-syncs to any iCloud-paired device via
+  // Universal Clipboard, including David's iPhone. If David has just
+  // copied a long prompt on his phone to paste into us, every Bento
+  // send would silently erase it. Capture whatever's on the clipboard
+  // *before* we trample it, then restore in `finally` so Universal
+  // Clipboard re-syncs the original content back to the phone.
+  // Text-only capture is sufficient for the iPhone case (Universal
+  // Clipboard primarily syncs text); rich/image clipboards on the Mac
+  // itself are still overwritten — that's a documented trade.
+  const willTouchClipboard = text.length > 0 || decodedImage !== null
+  let savedClipboard: string | null = null
+  if (willTouchClipboard) {
+    const peek = await runCommand("pbpaste", [], { timeoutMs: 1500 })
+    if (peek.code === 0) savedClipboard = peek.stdout
+  }
+
+  try {
   if (text.length > 0) {
     const pb = await runCommand("pbcopy", [], { input: text, timeoutMs: 3000 })
     if (pb.code !== 0) {
@@ -298,5 +316,15 @@ export async function sendToApp(args: SendToAppArgs): Promise<
     submitted: submit,
     sentKeys: [],
     sentImageBytes: decodedImage?.bytes.length ?? 0,
+  }
+  } finally {
+    if (savedClipboard !== null) {
+      // Best-effort restore. If this fails the user has already lost
+      // the clipboard contents — don't compound by failing the send.
+      await runCommand("pbcopy", [], {
+        input: savedClipboard,
+        timeoutMs: 1500,
+      }).catch(() => null)
+    }
   }
 }

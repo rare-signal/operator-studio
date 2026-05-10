@@ -9,6 +9,7 @@ import {
 } from "@/lib/server/db/schema"
 import {
   getFulfillmentsForStep,
+  getPassageById,
   getThreadById,
 } from "@/lib/operator-studio/queries"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
@@ -65,6 +66,34 @@ export async function GET(
   // 50 attached messages is a code-smell, not a normal case).
   const items = await Promise.all(
     fulfillments.map(async (f) => {
+      if (f.targetType === "passage") {
+        const passage = await getPassageById(workspaceId, f.targetId)
+        const thread = passage
+          ? await getThreadById(workspaceId, passage.threadId)
+          : null
+        return {
+          kind: "passage" as const,
+          fulfillmentId: f.id,
+          targetId: f.targetId,
+          threadId: passage?.threadId ?? null,
+          messageId: passage?.messageId ?? null,
+          threadTitle:
+            thread?.promotedTitle ??
+            thread?.rawTitle ??
+            (passage ? "Untitled thread" : null),
+          startOffset: passage?.startOffset ?? null,
+          endOffset: passage?.endOffset ?? null,
+          // textSnapshot is the durable record of what the operator
+          // elevated — it survives later edits to the source message
+          // and is what the modal should render.
+          preview: passage ? truncate(passage.textSnapshot, 280) : null,
+          textSnapshot: passage?.textSnapshot ?? null,
+          note: f.note,
+          promotedAt: f.promotedAt,
+          promotedBy: f.promotedBy,
+          missing: !passage,
+        }
+      }
       if (f.targetType === "thread") {
         const thread = await getThreadById(workspaceId, f.targetId)
         return {

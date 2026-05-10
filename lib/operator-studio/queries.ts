@@ -3549,6 +3549,32 @@ export async function getPassagesForThread(
   return rows.map(toPassage)
 }
 
+/**
+ * Fetch a single passage by id, scoped to the workspace. Returns
+ * `null` if the passage doesn't exist or is in another workspace.
+ *
+ * Used by the fulfill route to validate a passage target before
+ * accepting it as evidence, and by the evidence GET route to
+ * hydrate passage-typed fulfillments with their durable snapshot.
+ */
+export async function getPassageById(
+  workspaceId: string,
+  passageId: string
+): Promise<OperatorThreadPassage | null> {
+  const db = getDb()
+  const rows = await db
+    .select()
+    .from(operatorThreadPassages)
+    .where(
+      and(
+        eq(operatorThreadPassages.workspaceId, workspaceId),
+        eq(operatorThreadPassages.id, passageId)
+      )
+    )
+    .limit(1)
+  return rows[0] ? toPassage(rows[0]) : null
+}
+
 /** All passages within a single message — used for inline mark
  *  rendering when a message has multiple promoted spans. */
 export async function getPassagesForMessage(

@@ -140,6 +140,7 @@ export interface OperationsCard {
   /** True if this card needs David's eye (review state, blocked, or
    *  has a high-risk recommendation pending). */
   needsAttention: boolean
+  nextAction?: { kind: string; label: string }
 }
 
 export interface OperationsLane {

@@ -6,6 +6,7 @@ import { operatorPlanSteps } from "@/lib/server/db/schema"
 import { and, eq, isNull } from "drizzle-orm"
 
 import {
+  getPassageById,
   getSessionsForWorkspace,
   promoteToStep,
 } from "@/lib/operator-studio/queries"
@@ -13,7 +14,7 @@ import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 
 export const dynamic = "force-dynamic"
 
-const VALID_TARGETS = new Set(["thread", "message"])
+const VALID_TARGETS = new Set(["thread", "message", "passage"])
 
 /**
  * POST /api/operator-studio/plans/[id]/steps/[stepId]/fulfill
@@ -26,7 +27,13 @@ const VALID_TARGETS = new Set(["thread", "message"])
  * session is resolved server-side and stored as provenance for when that
  * evidence was accepted.
  *
- * Body: { targetType: "thread" | "message", targetId: string, note?: string }
+ * Body: { targetType: "thread" | "message" | "passage", targetId: string, note?: string }
+ *
+ * `passage` targets reference an `operator_thread_passages` row — the passage
+ * already carries a durable text snapshot, message id, thread id, and char
+ * offsets, so attaching one as evidence survives later edits to the source
+ * message. The route validates the passage exists in the active workspace
+ * before accepting.
  */
 export async function POST(
   req: NextRequest,
@@ -43,7 +50,7 @@ export async function POST(
   }
   if (typeof body.targetType !== "string" || !VALID_TARGETS.has(body.targetType)) {
     return NextResponse.json(
-      { error: "targetType must be 'thread' or 'message'" },
+      { error: "targetType must be 'thread', 'message', or 'passage'" },
       { status: 400 }
     )
   }
@@ -52,6 +59,19 @@ export async function POST(
   }
 
   const workspaceId = await getActiveWorkspaceId()
+
+  // Passage targets must resolve to a real row in this workspace before we
+  // accept them — keeps the snapshot/evidence trail honest and prevents a
+  // foreign or deleted passage id from being smuggled in as fake coverage.
+  if (body.targetType === "passage") {
+    const passage = await getPassageById(workspaceId, body.targetId.trim())
+    if (!passage) {
+      return NextResponse.json(
+        { error: "Passage not found in this workspace" },
+        { status: 404 }
+      )
+    }
+  }
 
   // Verify the step actually belongs to this plan in this workspace.
   const db = getDb()
@@ -91,7 +111,7 @@ export async function POST(
     workspaceId,
     session.id,
     stepId,
-    body.targetType as "thread" | "message",
+    body.targetType as "thread" | "message" | "passage",
     body.targetId.trim(),
     promotedBy,
     typeof body.note === "string" ? body.note : undefined

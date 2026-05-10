@@ -36,6 +36,12 @@ const nextConfig = {
   experimental: {
     optimizePackageImports: ["lucide-react", "radix-ui"],
   },
+  // Hide the floating "N" dev indicator. It overlapped the composer's
+  // image-attach button on mobile and the user never interacts with it.
+  // (Setting `false` covers both `buildActivity` and any newer Next.js
+  // dev-overlay button. If a future version splits these out we can
+  // selectively keep the build spinner.)
+  devIndicators: false,
 }
 
 export default nextConfig

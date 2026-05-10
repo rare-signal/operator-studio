@@ -264,7 +264,7 @@ export interface OperatorSessionPlan {
   steps: OperatorPlanStep[]
 }
 
-export type OperatorFulfillmentTargetType = "thread" | "message"
+export type OperatorFulfillmentTargetType = "thread" | "message" | "passage"
 
 /**
  * Accepted evidence for a plan step.

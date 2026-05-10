@@ -1008,6 +1008,14 @@ export const operatorThreadCardBindings = pgTable(
     confidence: doublePrecision("confidence"),
     rationale: text("rationale"),
     sourceRecommendationId: text("source_recommendation_id"),
+    /** Composite agent id of the executive that originated this binding's
+     *  agent (e.g. `claude:<uuid>` of the cockpit exec). Null for
+     *  bindings created without an executive context (legacy launches,
+     *  manual adoptions, operator-recommendation launches). */
+    spawnedByAgentId: text("spawned_by_agent_id"),
+    /** How the spawn was originated. Free-form for forward-compat —
+     *  current values: `cockpit` | `recommendation` | `manual`. */
+    spawnOrigin: text("spawn_origin"),
     createdBy: text("created_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
@@ -1023,6 +1031,7 @@ export const operatorThreadCardBindings = pgTable(
     index("idx_op_thread_bindings_step").on(t.workspaceId, t.planStepId),
     index("idx_op_thread_bindings_workspace").on(t.workspaceId),
     index("idx_op_thread_bindings_agent").on(t.workspaceId, t.agentId),
+    index("idx_op_thread_bindings_spawned_by").on(t.workspaceId, t.spawnedByAgentId),
   ]
 )
 

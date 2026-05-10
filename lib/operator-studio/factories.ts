@@ -235,6 +235,39 @@ export async function listFactoryPlanSteps(
 }
 
 /**
+ * Resolve the factory bound to a given plan step, applying the
+ * `step.factoryId ?? plan.factoryId` precedence from
+ * `pattern-software-factory-context-air-gap`. Returns null if the step
+ * has no factory binding (or the bound factory row is missing).
+ */
+export async function resolveFactoryForPlanStep(
+  workspaceId: string,
+  planStepId: string
+): Promise<SoftwareFactory | null> {
+  const db = getDb()
+  const rows = await db
+    .select({
+      stepFactoryId: operatorPlanSteps.factoryId,
+      planFactoryId: operatorPlans.factoryId,
+    })
+    .from(operatorPlanSteps)
+    .leftJoin(operatorPlans, eq(operatorPlans.id, operatorPlanSteps.planId))
+    .where(
+      and(
+        eq(operatorPlanSteps.workspaceId, workspaceId),
+        eq(operatorPlanSteps.id, planStepId),
+        isNull(operatorPlanSteps.deletedAt)
+      )
+    )
+    .limit(1)
+  const row = rows[0]
+  if (!row) return null
+  const factoryId = row.stepFactoryId ?? row.planFactoryId
+  if (!factoryId) return null
+  return getFactory(workspaceId, factoryId)
+}
+
+/**
  * Build the launch-prompt header text for an agent dispatched to do
  * work inside this factory. Future agents should call this at launch
  * to get an unambiguous context bundle (per
@@ -269,4 +302,24 @@ export function renderFactoryContextHeader(f: SoftwareFactory): string {
   }
   lines.push(`[/FACTORY CONTEXT]`)
   return lines.join("\n")
+}
+
+/**
+ * Wrap a launch prompt with this factory's context bundle. Idempotent
+ * — if the prompt already opens with `[FACTORY CONTEXT]` (e.g. caller
+ * pre-rendered via `renderAgentManifest` / `os:hydrate`), the prompt
+ * is returned unchanged so we don't double-header.
+ *
+ * Per F5 (`step-software-factory-context-bundle-handoff`): every
+ * launched worker — tmux, Claude Desktop, Codex Desktop — must open
+ * with this bundle so the boundary between repos / products / comms
+ * substrates is unambiguous before the worker reads anything else.
+ */
+export function wrapPromptWithFactoryBundle(
+  factory: SoftwareFactory,
+  prompt: string
+): string {
+  if (/^\s*\[FACTORY CONTEXT\]/.test(prompt)) return prompt
+  const header = renderFactoryContextHeader(factory)
+  return `${header}\n\n${prompt}`
 }

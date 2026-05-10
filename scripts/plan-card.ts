@@ -18,9 +18,10 @@ import {
 } from "../lib/operator-studio/plans"
 import { GLOBAL_WORKSPACE_ID } from "../lib/operator-studio/workspaces"
 import { getPgPool } from "../lib/server/db/client"
+import type { OperatorSessionPlan } from "../lib/operator-studio/types"
 
 type Status = "open" | "in-motion" | "covered" | "skipped"
-type Command = "upsert" | "status" | "delete" | "restore"
+type Command = "list" | "show" | "upsert" | "status" | "delete" | "restore"
 
 interface Options {
   command: Command
@@ -42,6 +43,8 @@ function usage(message?: string): never {
   console.error(
     [
       "usage:",
+      "  pnpm plan:card list [--status=open] [--json]",
+      "  pnpm plan:card show --id=step-id [--json]",
       "  pnpm plan:card upsert --title='Card title' [--id=step-id] [--parent=step-id] [--status=open] [--description='...']",
       "  pnpm plan:card status --id=step-id --status=in-motion",
       "  pnpm plan:card delete --id=step-id [--no-cascade]",
@@ -76,7 +79,7 @@ function parseArgs(argv: string[]): Options {
   const rawCommand = argv[0]
   if (!rawCommand || rawCommand === "--help" || rawCommand === "-h") usage()
   const command = rawCommand as Command
-  if (!["upsert", "status", "delete", "restore"].includes(command)) {
+  if (!["list", "show", "upsert", "status", "delete", "restore"].includes(command)) {
     usage(`unknown command: ${command}`)
   }
 
@@ -188,9 +191,86 @@ function output(opts: Options, value: unknown) {
   console.log(JSON.stringify(value, null, 2))
 }
 
+function outputList(opts: Options, plan: OperatorSessionPlan) {
+  const steps = opts.status
+    ? plan.steps.filter((step) => step.status === opts.status)
+    : plan.steps
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          plan: {
+            id: plan.id,
+            title: plan.title,
+            state: plan.state,
+            pinned: plan.pinned,
+          },
+          count: steps.length,
+          steps: steps.map((step) => ({
+            id: step.id,
+            title: step.title,
+            status: step.status,
+            parentStepId: step.parentStepId,
+            order: step.order,
+          })),
+        },
+        null,
+        2
+      )
+    )
+    return
+  }
+
+  console.log(`${plan.title} (${plan.id})`)
+  console.log(`state=${plan.state} pinned=${plan.pinned ? "yes" : "no"} cards=${steps.length}`)
+  if (steps.length === 0) {
+    console.log(opts.status ? `No ${opts.status} cards.` : "No cards yet.")
+    return
+  }
+  for (const step of steps) {
+    const parent = step.parentStepId ? ` parent=${step.parentStepId}` : ""
+    console.log(`[${step.status}] ${step.id}${parent} — ${step.title}`)
+  }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2))
   const plan = await resolvePlan(opts.workspaceId, opts.planId)
+
+  if (opts.command === "list") {
+    outputList(opts, plan)
+    return
+  }
+
+  if (opts.command === "show") {
+    if (!opts.id) usage("show requires --id")
+    const step = plan.steps.find((s) => s.id === opts.id)
+    if (!step) usage(`step not found in plan ${plan.id}: ${opts.id}`)
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            plan: { id: plan.id, title: plan.title },
+            step: {
+              id: step.id,
+              title: step.title,
+              status: step.status,
+              parentStepId: step.parentStepId,
+              order: step.order,
+              description: step.description ?? null,
+            },
+          },
+          null,
+          2
+        )
+      )
+      return
+    }
+    const { renderPlanStep } = await import("../lib/mcp-server/views/plan-view")
+    console.log(renderPlanStep(plan, step, { includeChildren: true }))
+    return
+  }
 
   if (opts.command === "upsert") {
     if (!opts.title) usage("upsert requires --title")

@@ -26,6 +26,10 @@ import {
   getExecutiveRecommendation,
   recordRecommendationLaunch,
 } from "@/lib/operator-studio/executive-recommendations"
+import {
+  resolveFactoryForPlanStep,
+  wrapPromptWithFactoryBundle,
+} from "@/lib/operator-studio/factories"
 import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import { isHotModeArmed } from "@/lib/server/agent-bridge/hot-mode"
 import { launchClaudeWorker } from "@/lib/server/agent-bridge/tmux-launch"
@@ -96,12 +100,24 @@ export async function POST(
     )
   }
 
-  const cwd = cwdOverride ?? rec.payload.target.cwd ?? null
+  // F5: prepend the bound factory's context bundle so the worker boots
+  // with unambiguous repo/product/comms boundaries before it reads the
+  // recommendation prompt. Idempotent — if the prompt was already
+  // hydrated via os:hydrate / agent_startup_manifest it stays as-is.
+  const planStepId = rec.payload.target.planStepId ?? null
+  const factory = planStepId
+    ? await resolveFactoryForPlanStep(workspaceId, planStepId)
+    : null
+  const promptWithBundle = factory
+    ? wrapPromptWithFactoryBundle(factory, prompt)
+    : prompt
+  const cwd =
+    cwdOverride ?? rec.payload.target.cwd ?? factory?.productRepoPath ?? null
 
   const result = await launchClaudeWorker({
     recommendationId: rec.id,
     cwd,
-    prompt,
+    prompt: promptWithBundle,
     launchCommand,
     promptDelayMs,
     collisionPolicy,
@@ -120,7 +136,7 @@ export async function POST(
       launchCommand: result.launchCommand,
       promptPreview: result.promptPreview,
       launchedAt: result.launchedAt,
-      planStepId: rec.payload.target.planStepId ?? null,
+      planStepId,
     },
     `Launched in tmux:${result.sessionName} (${result.agentId})`
   )
