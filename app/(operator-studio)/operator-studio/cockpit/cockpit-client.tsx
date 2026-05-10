@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { ArrowLeft, ChevronDown, ChevronUp, X } from "lucide-react"
+import { ArrowLeft, ChevronDown, ChevronUp, Home, X } from "lucide-react"
 
 import {
   BentoPane,
@@ -80,11 +80,18 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
   }, [])
 
   // Recent-agents polling (same endpoint + shape as BentoView).
+  // Bumped appLimit from default 8 → 40 (the route's max) so that
+  // spawned-by-exec workers don't disappear from the cockpit drawer
+  // when they age past the top-8 recency window. Workers 7 + 9 went
+  // missing on 2026-05-10 because overnight smoke spawns pushed them
+  // off the recent-8 list. This is a band-aid; the proper fix is to
+  // always include spawned-by metadata regardless of recency. Carded
+  // separately as `step-cockpit-spawned-by-recency-independence`.
   React.useEffect(() => {
     let alive = true
     async function poll() {
       try {
-        const r = await fetch("/api/operator-studio/agents", {
+        const r = await fetch("/api/operator-studio/agents?appLimit=40", {
           cache: "no-store",
         })
         if (!r.ok) {
@@ -320,7 +327,10 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
         workerActive={!!worker}
         execCollapsed={execCollapsed}
         onUnpinExec={clearExec}
-        onBackToWorkers={() => setWorkerId(null)}
+        onBackToMain={() => {
+          setWorkerId(null)
+          setMaximizedAgentId(null)
+        }}
         onToggleExecCollapsed={() => setExecCollapsed((v) => !v)}
         hotMode={hotMode}
         onArm={arm}
@@ -485,7 +495,7 @@ function TopRail({
   workerActive,
   execCollapsed,
   onUnpinExec,
-  onBackToWorkers,
+  onBackToMain,
   onToggleExecCollapsed,
   hotMode,
   onArm,
@@ -496,7 +506,7 @@ function TopRail({
   workerActive: boolean
   execCollapsed: boolean
   onUnpinExec: () => void
-  onBackToWorkers: () => void
+  onBackToMain: () => void
   onToggleExecCollapsed: () => void
   hotMode: HotModeStatus | null
   onArm: (pin: string, durationMs?: number) => Promise<void>
@@ -514,11 +524,14 @@ function TopRail({
         <>
           <button
             type="button"
-            onClick={onBackToWorkers}
-            className="inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded text-[12px] font-medium text-stone-700 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-800"
+            onClick={onBackToMain}
+            className="inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded text-[12px] font-semibold text-stone-800 dark:text-stone-100 bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700"
+            aria-label="Back to main cockpit view"
+            title="Back to main view (exec + workers list)"
           >
             <ArrowLeft className="h-4 w-4" />
-            Workers
+            <Home className="h-3.5 w-3.5" />
+            Cockpit
           </button>
           {exec && (
             <button
