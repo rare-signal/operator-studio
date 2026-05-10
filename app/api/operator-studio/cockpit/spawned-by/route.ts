@@ -41,6 +41,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 
 import { authorizeRequest } from "@/lib/operator-studio/auth"
+import { maybeNotifyOnReadyTransition } from "@/lib/operator-studio/notifier"
 import {
   computeReviewStatus,
   extractLastAssistantSnippet,
@@ -241,6 +242,22 @@ export async function GET(req: NextRequest) {
     if (r !== 0) return r
     return a.spawnedAt.localeCompare(b.spawnedAt)
   })
+
+  // Fire phone alerts for any worker that just transitioned from a
+  // non-ready tier into a ready-for-review tier. Per-process memory
+  // (see notifier.ts) prevents duplicate alerts on subsequent polls.
+  // Fire-and-forget — never block the response on push delivery.
+  const baseUrl = process.env.OPERATOR_STUDIO_BASE_URL ?? "http://localhost:4200"
+  for (const w of workers) {
+    if (!w.active) continue
+    void maybeNotifyOnReadyTransition(w.agentId, w.reviewStatus, {
+      title: `Worker ${w.sequence} ready for review`,
+      body: `${w.label ?? w.agentId} — ${w.title ?? w.reviewStatus}`,
+      url: `${baseUrl}/operator-studio/cockpit?worker=${encodeURIComponent(w.agentId)}`,
+    }).catch((err) => {
+      console.warn("[spawned-by] notifier failed:", err)
+    })
+  }
 
   const agentIds = Array.from(new Set(active.map((b) => b.agentId)))
   return NextResponse.json({ agentIds, workers })
