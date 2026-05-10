@@ -62,11 +62,32 @@ const REVIEW_STATUS_RANK: Record<ReviewStatus, number> = {
 
 const HOME_PREFIX = "/operator-studio"
 
+import {
+  LanePicker,
+  getStoredActiveLaneId,
+  setStoredActiveLaneId,
+} from "./lane-picker"
+
 interface CockpitClientProps {
   initialExecAgentId: string | null
+  workspaceId: string
 }
 
-export default function CockpitClient({ initialExecAgentId }: CockpitClientProps) {
+export default function CockpitClient({
+  initialExecAgentId,
+  workspaceId,
+}: CockpitClientProps) {
+  const [activeLaneId, setActiveLaneId] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    setActiveLaneId(getStoredActiveLaneId(workspaceId))
+  }, [workspaceId])
+  const selectLane = React.useCallback(
+    (laneId: string) => {
+      setActiveLaneId(laneId)
+      setStoredActiveLaneId(workspaceId, laneId)
+    },
+    [workspaceId]
+  )
   const [agents, setAgents] = React.useState<AgentListItem[]>([])
   const [agentsError, setAgentsError] = React.useState<string | null>(null)
   const [execId, setExecId] = React.useState<AgentCompositeId | null>(
@@ -383,6 +404,12 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
         paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
+      <LanePicker
+        workspaceId={workspaceId}
+        selectedLaneId={activeLaneId}
+        onSelect={selectLane}
+      />
+
       <TopRail
         exec={exec}
         workerActive={!!worker}

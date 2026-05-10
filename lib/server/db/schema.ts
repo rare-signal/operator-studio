@@ -1055,6 +1055,45 @@ export const operatorCockpitExecs = pgTable(
   (t) => [index("idx_op_cockpit_execs_agent").on(t.agentId)]
 )
 
+// ─── Work lanes — tertiary container above plans, below workspace ────────
+// Each lane is air-gapped: own exec, own pulled-in scope. Multiple lanes
+// per workspace; cockpit's top-level picker switches between them.
+export const operatorWorkLanes = pgTable(
+  "operator_work_lanes",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    execAgentId: text("exec_agent_id"),
+    execAgentKind: text("exec_agent_kind"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_op_work_lanes_workspace").on(t.workspaceId),
+    index("idx_op_work_lanes_exec_agent").on(t.execAgentId),
+  ]
+)
+
+export const operatorWorkLaneMembership = pgTable(
+  "operator_work_lane_membership",
+  {
+    laneId: text("lane_id")
+      .notNull()
+      .references(() => operatorWorkLanes.id, { onDelete: "cascade" }),
+    memberKind: text("member_kind").notNull(),
+    memberId: text("member_id").notNull(),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_op_work_lane_membership_lane").on(t.laneId),
+    index("idx_op_work_lane_membership_member").on(t.memberKind, t.memberId),
+  ]
+)
+
 // ─── Outbox — staged outbound communications (gated send) ─────────────────
 //
 // Every outbound communication (ADO comment, Teams post, ADO state/priority
@@ -1224,6 +1263,8 @@ export const schema = {
   operatorReviewItems,
   operatorThreadCardBindings,
   operatorCockpitExecs,
+  operatorWorkLanes,
+  operatorWorkLaneMembership,
   operatorOutboxMessages,
   softwareFactories,
   operatorInboxEvents,
