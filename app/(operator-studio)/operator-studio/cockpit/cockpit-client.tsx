@@ -121,9 +121,13 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
   const [spawnedAgentIds, setSpawnedAgentIds] = React.useState<Set<string>>(
     new Set()
   )
+  const [workerSequenceByAgentId, setWorkerSequenceByAgentId] = React.useState<
+    Map<string, number>
+  >(new Map())
   React.useEffect(() => {
     if (!execId) {
       setSpawnedAgentIds(new Set())
+      setWorkerSequenceByAgentId(new Map())
       return
     }
     let alive = true
@@ -134,9 +138,23 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
           { cache: "no-store" }
         )
         if (!r.ok) return
-        const data = (await r.json()) as { agentIds?: string[] }
+        const data = (await r.json()) as {
+          agentIds?: string[]
+          workers?: Array<{ agentId: string; sequence: number }>
+        }
         const ids = Array.isArray(data?.agentIds) ? data.agentIds : []
-        if (alive) setSpawnedAgentIds(new Set(ids))
+        const seqMap = new Map<string, number>()
+        if (Array.isArray(data?.workers)) {
+          for (const w of data.workers) {
+            if (typeof w?.agentId === "string" && typeof w?.sequence === "number") {
+              seqMap.set(w.agentId, w.sequence)
+            }
+          }
+        }
+        if (alive) {
+          setSpawnedAgentIds(new Set(ids))
+          setWorkerSequenceByAgentId(seqMap)
+        }
       } catch {
         /* ignore */
       }
@@ -445,6 +463,7 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
             <Pane className="shrink-0 max-h-1/2 overflow-y-auto">
               <WorkersList
                 workers={spawnedWorkers}
+                workerSequenceByAgentId={workerSequenceByAgentId}
                 onPick={(id) => setWorkerId(id)}
               />
             </Pane>
@@ -614,9 +633,11 @@ function PickList({
 
 function WorkersList({
   workers,
+  workerSequenceByAgentId,
   onPick,
 }: {
   workers: AgentListItem[]
+  workerSequenceByAgentId: Map<string, number>
   onPick: (id: AgentCompositeId) => void
 }) {
   return (
@@ -626,7 +647,12 @@ function WorkersList({
       </div>
       <ul className="divide-y divide-stone-200 dark:divide-stone-800">
         {workers.map((a) => (
-          <AgentRow key={a.id} agent={a} onPick={onPick} />
+          <AgentRow
+            key={a.id}
+            agent={a}
+            workerSequence={workerSequenceByAgentId.get(a.id) ?? null}
+            onPick={onPick}
+          />
         ))}
       </ul>
     </div>
@@ -635,9 +661,11 @@ function WorkersList({
 
 function AgentRow({
   agent,
+  workerSequence,
   onPick,
 }: {
   agent: AgentListItem
+  workerSequence?: number | null
   onPick: (id: AgentCompositeId) => void
 }) {
   return (
@@ -654,8 +682,14 @@ function AgentRow({
             }`}
             aria-hidden
           />
-          <span className="text-[10px] uppercase tracking-wider text-stone-500">
+          <span
+            className="text-[10px] uppercase tracking-wider text-stone-500"
+            title={agent.id}
+          >
             {agent.source}
+            {typeof workerSequence === "number"
+              ? ` · Worker ${workerSequence}`
+              : ""}
           </span>
           <span className="ml-auto text-[10px] text-stone-500">
             {formatRelative(agent.lastActivityAt)}
