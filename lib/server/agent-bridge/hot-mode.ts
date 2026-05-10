@@ -105,6 +105,49 @@ export function disarmHotMode(): void {
   r.armedAtMs = 0
 }
 
+export type ExtendResult =
+  | { ok: true; armedUntilMs: number; remainingMs: number; clamped: boolean }
+  | { ok: false; reason: "not-armed" | "bad-duration" }
+
+/**
+ * Push the disarm time further out by `extraMs`, without requiring the
+ * PIN — the assumption is that the operator is already at the cockpit
+ * (the plastic cover is already up), and the +5min affordance should
+ * be friction-free.
+ *
+ * Cap is measured from `Date.now()` rather than `armedAtMs` so the
+ * total armed window can't exceed MAX_DURATION_MS even if the operator
+ * keeps tapping +5min. If the extension would push past that cap, the
+ * new armedUntilMs is clamped to `Date.now() + MAX_DURATION_MS` and
+ * the result includes `clamped: true` so the UI can give a "max
+ * window reached" hint.
+ *
+ * Fails with `not-armed` if the system is currently disarmed — extend
+ * isn't a back-door to arming. The UI should prompt for PIN-arm
+ * instead.
+ */
+export function extendHotMode(extraMs: number): ExtendResult {
+  if (typeof extraMs !== "number" || !Number.isFinite(extraMs) || extraMs <= 0) {
+    return { ok: false, reason: "bad-duration" }
+  }
+  const r = runtime()
+  const now = Date.now()
+  if (r.armedUntilMs <= now) {
+    return { ok: false, reason: "not-armed" }
+  }
+  const requestedUntil = r.armedUntilMs + extraMs
+  const cap = now + MAX_DURATION_MS
+  const newUntil = Math.min(requestedUntil, cap)
+  const clamped = newUntil < requestedUntil
+  r.armedUntilMs = newUntil
+  return {
+    ok: true,
+    armedUntilMs: newUntil,
+    remainingMs: newUntil - now,
+    clamped,
+  }
+}
+
 /** For diagnostics. Not exposed over the wire. */
 export function _internalArmedAtMs(): number {
   return runtime().armedAtMs
