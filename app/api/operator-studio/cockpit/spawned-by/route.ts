@@ -29,7 +29,11 @@
  *       project: string | null,
  *       title: string | null,
  *       isLive: boolean,
- *       reviewStatus: "live" | "ready-for-review" | "idle",
+ *       reviewStatus: "live" | "candidate-self-believed"
+ *                   | "awaiting-berthier-check" | "berthier-reviewed"
+ *                   | "human-approved" | "idle",
+ *       berthierReviewedAt: string | null,
+ *       humanApprovedAt: string | null,
  *     }>
  *   }
  */
@@ -40,6 +44,7 @@ import { authorizeRequest } from "@/lib/operator-studio/auth"
 import {
   computeReviewStatus,
   extractLastAssistantSnippet,
+  REVIEW_STATUS_RANK,
   type ReviewStatus,
 } from "@/lib/operator-studio/review-status"
 import {
@@ -71,10 +76,12 @@ export async function GET(req: NextRequest) {
   // Safety-net auto-detach: stale ready-for-review workers that David
   // never circled back to get pulled out of the active rail before we
   // compute the response. Configurable via env var; "0" disables.
+  // Multi-tier review (0034): default threshold lifts to 24h —
+  // `berthier-reviewed` is the only tier auto-detach now considers.
   const autoDetachMinutesRaw = process.env.OPERATOR_STUDIO_AUTO_DETACH_MINUTES
   const autoDetachMinutes =
     autoDetachMinutesRaw === undefined
-      ? 60
+      ? 24 * 60
       : Math.max(0, Number(autoDetachMinutesRaw) || 0)
   if (autoDetachMinutes > 0) {
     await autoDetachStaleReadyWorkers(
@@ -104,6 +111,8 @@ export async function GET(req: NextRequest) {
       spawnedAt: string
       active: boolean
       detachReason: string | null
+      berthierReviewedAt: string | null
+      humanApprovedAt: string | null
     }
   >()
   for (const b of all) {
@@ -115,13 +124,17 @@ export async function GET(req: NextRequest) {
         spawnedAt: b.createdAt,
         active: b.detachedAt === null,
         detachReason: b.detachedAt !== null ? b.detachReason : null,
+        berthierReviewedAt: b.berthierReviewedAt,
+        humanApprovedAt: b.humanApprovedAt,
       })
     } else {
       if (b.detachedAt === null) prior.active = true
-      // Always prefer the most-recent detach reason if present.
       if (b.detachedAt !== null && b.detachReason) {
         prior.detachReason = b.detachReason
       }
+      // Carry the most-recent review-tier stamps forward.
+      if (b.berthierReviewedAt) prior.berthierReviewedAt = b.berthierReviewedAt
+      if (b.humanApprovedAt) prior.humanApprovedAt = b.humanApprovedAt
     }
   }
 
@@ -143,7 +156,7 @@ export async function GET(req: NextRequest) {
           project: null as string | null,
           title: null as string | null,
           isLive: false,
-          reviewStatus: "idle" as ReviewStatus,
+          reviewStatus: (w.humanApprovedAt ? "human-approved" : "idle") as ReviewStatus,
           lastAssistantSnippet: null as string | null,
         }
       }
@@ -158,7 +171,7 @@ export async function GET(req: NextRequest) {
           project: null,
           title: null,
           isLive: false,
-          reviewStatus: "idle" as ReviewStatus,
+          reviewStatus: (w.humanApprovedAt ? "human-approved" : "idle") as ReviewStatus,
           lastAssistantSnippet: null as string | null,
         }
       }
@@ -174,7 +187,7 @@ export async function GET(req: NextRequest) {
           project: null,
           title: null,
           isLive: false,
-          reviewStatus: "idle" as ReviewStatus,
+          reviewStatus: (w.humanApprovedAt ? "human-approved" : "idle") as ReviewStatus,
           lastAssistantSnippet: null as string | null,
         }
       }
@@ -188,17 +201,21 @@ export async function GET(req: NextRequest) {
       const lastActivityAt = new Date(entry.mtimeMs).toISOString()
       let reviewStatus: ReviewStatus = "live"
       let lastAssistantSnippet: string | null = null
+      const bindingState = {
+        berthierReviewedAt: w.berthierReviewedAt,
+        humanApprovedAt: w.humanApprovedAt,
+      }
       try {
         const tail = await getAppSessionTail(app, parsed.ref, 50)
         if (!("error" in tail)) {
           status = tail.status
-          reviewStatus = computeReviewStatus(tail.turns, lastActivityAt)
+          reviewStatus = computeReviewStatus(tail.turns, lastActivityAt, bindingState)
           lastAssistantSnippet = extractLastAssistantSnippet(tail.turns)
         } else {
-          reviewStatus = computeReviewStatus([], lastActivityAt)
+          reviewStatus = computeReviewStatus([], lastActivityAt, bindingState)
         }
       } catch {
-        reviewStatus = computeReviewStatus([], lastActivityAt)
+        reviewStatus = computeReviewStatus([], lastActivityAt, bindingState)
       }
       return {
         ...w,
@@ -214,6 +231,16 @@ export async function GET(req: NextRequest) {
       }
     })
   )
+
+  // Multi-tier review sort (0034): awaiting-berthier-check >
+  // berthier-reviewed > live > idle > human-approved. Stable within
+  // each tier via spawnedAt. David always sees what's NOT yet
+  // human-approved at the top.
+  workers.sort((a, b) => {
+    const r = REVIEW_STATUS_RANK[a.reviewStatus] - REVIEW_STATUS_RANK[b.reviewStatus]
+    if (r !== 0) return r
+    return a.spawnedAt.localeCompare(b.spawnedAt)
+  })
 
   const agentIds = Array.from(new Set(active.map((b) => b.agentId)))
   return NextResponse.json({ agentIds, workers })

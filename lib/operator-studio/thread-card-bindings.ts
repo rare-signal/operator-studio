@@ -63,6 +63,10 @@ export interface ThreadCardBinding {
   /** Free-form rationale captured at detach time. Null if the binding
    *  is still active or was detached without a reason. */
   detachReason: string | null
+  /** ISO timestamp; non-null = Berthier explicitly acknowledged. */
+  berthierReviewedAt: string | null
+  /** ISO timestamp; non-null = David explicitly signed off. */
+  humanApprovedAt: string | null
 }
 
 export interface UpsertThreadCardBindingInput {
@@ -102,6 +106,12 @@ function rowToBinding(row: typeof operatorThreadCardBindings.$inferSelect): Thre
     updatedAt: row.updatedAt.toISOString(),
     detachedAt: row.detachedAt ? row.detachedAt.toISOString() : null,
     detachReason: row.detachReason ?? null,
+    berthierReviewedAt: row.berthierReviewedAt
+      ? row.berthierReviewedAt.toISOString()
+      : null,
+    humanApprovedAt: row.humanApprovedAt
+      ? row.humanApprovedAt.toISOString()
+      : null,
   }
 }
 
@@ -309,21 +319,105 @@ export async function getActiveBindingsForAgents(
 
 /** Detach an agent from whatever card it currently maps to. The
  *  optional `detachReason` is persisted on the row for the
- *  recently-completed drawer (and for follow-on tooling). */
+ *  recently-completed drawer (and for follow-on tooling).
+ *
+ *  When `humanApproved=true` (passed via the options form), also
+ *  stamps `human_approved_at` and `berthier_reviewed_at` (if not
+ *  already set) — semantics: David's explicit sign-off implies
+ *  Berthier scrutiny is no longer load-bearing. */
 export async function detachThreadCardBinding(
   workspaceId: string,
   agentId: string,
-  detachReason?: string | null
+  reasonOrOpts?:
+    | string
+    | null
+    | { reason?: string | null; humanApproved?: boolean }
+): Promise<boolean> {
+  const opts =
+    typeof reasonOrOpts === "string" || reasonOrOpts == null
+      ? { reason: (reasonOrOpts as string | null) ?? null, humanApproved: false }
+      : {
+          reason: reasonOrOpts.reason ?? null,
+          humanApproved: !!reasonOrOpts.humanApproved,
+        }
+  const db = getDb()
+  const now = new Date()
+  const setFields: Record<string, unknown> = {
+    detachedAt: now,
+    updatedAt: now,
+    detachReason: opts.reason,
+  }
+  if (opts.humanApproved) {
+    setFields.humanApprovedAt = now
+    // Mark Berthier-reviewed too if not already; human approval
+    // logically subsumes Berthier scrutiny.
+    setFields.berthierReviewedAt = now
+  }
+  const updated = await db
+    .update(operatorThreadCardBindings)
+    .set(setFields)
+    .where(
+      and(
+        eq(operatorThreadCardBindings.workspaceId, workspaceId),
+        eq(operatorThreadCardBindings.agentId, agentId),
+        isNull(operatorThreadCardBindings.detachedAt)
+      )
+    )
+    .returning({ id: operatorThreadCardBindings.id })
+  return updated.length > 0
+}
+
+/** Stamp `berthier_reviewed_at = now` on the active binding for
+ *  (workspace, agent). Does not detach. Returns true if a row was
+ *  updated. Optionally records `reason` on the row's
+ *  `detach_reason` column (sentinel — we reuse the column for the
+ *  Berthier ack rationale until a dedicated column lands). */
+export async function setBerthierReviewedAt(
+  workspaceId: string,
+  agentId: string,
+  reason?: string | null
 ): Promise<boolean> {
   const db = getDb()
   const now = new Date()
+  const setFields: Record<string, unknown> = {
+    berthierReviewedAt: now,
+    updatedAt: now,
+  }
+  if (reason) setFields.detachReason = reason
   const updated = await db
     .update(operatorThreadCardBindings)
-    .set({
-      detachedAt: now,
-      updatedAt: now,
-      detachReason: detachReason ?? null,
-    })
+    .set(setFields)
+    .where(
+      and(
+        eq(operatorThreadCardBindings.workspaceId, workspaceId),
+        eq(operatorThreadCardBindings.agentId, agentId),
+        isNull(operatorThreadCardBindings.detachedAt)
+      )
+    )
+    .returning({ id: operatorThreadCardBindings.id })
+  return updated.length > 0
+}
+
+/** Stamp `human_approved_at = now` (and `berthier_reviewed_at` if
+ *  not set) on the active binding for (workspace, agent). Does not
+ *  detach — use `detachThreadCardBinding({ humanApproved: true })`
+ *  for the combined sign-off-and-retire path. */
+export async function setHumanApprovedAt(
+  workspaceId: string,
+  agentId: string,
+  reason?: string | null
+): Promise<boolean> {
+  const db = getDb()
+  const now = new Date()
+  const setFields: Record<string, unknown> = {
+    humanApprovedAt: now,
+    berthierReviewedAt: now,
+    updatedAt: now,
+  }
+  if (reason) setFields.detachReason = reason
+  const updated = await db
+    .update(operatorThreadCardBindings)
+    .set(setFields)
     .where(
       and(
         eq(operatorThreadCardBindings.workspaceId, workspaceId),
@@ -336,20 +430,28 @@ export async function detachThreadCardBinding(
 }
 
 /**
- * Safety-net auto-detach: walks active bindings in the workspace, and
- * for each whose reviewStatus is "ready-for-review" AND whose last
- * touch (updatedAt) is older than `thresholdMs`, detaches the binding
- * with a synthetic reason. This protects the active rail from bloating
- * with stale workers David never circled back to.
+ * Safety-net auto-detach for the multi-tier review state machine
+ * (0034). Walks active bindings; detaches **only** those in the
+ * `berthier-reviewed` tier whose last touch is older than the
+ * (much-longer) threshold. Never auto-detaches:
  *
- * Recently-completed preserves visibility — the operator can still tap
- * into the worker's final messages from the drawer.
+ *   - "candidate-self-believed" / "awaiting-berthier-check" — Berthier
+ *     hasn't even glanced; auto-detach would silently miscarriage the
+ *     work David most needs to be reminded of.
+ *   - "live" / "idle" — nothing actionable.
+ *   - "human-approved" — already terminal; detach-or-not is up to the
+ *     mark-done CLI / cockpit affordance.
+ *
+ * Default threshold: 24 hours. The legacy `thresholdMs` numeric arg
+ * is preserved for callers that pass milliseconds, but is now
+ * interpreted as the `berthier-reviewed` threshold (per the plan
+ * card's "much longer threshold (24h default)" rule).
  *
  * Returns the count of bindings that were detached this call.
  */
 export async function autoDetachStaleReadyWorkers(
   workspaceId: string,
-  thresholdMs: number = 60 * 60_000
+  thresholdMs: number = 24 * 60 * 60_000
 ): Promise<number> {
   if (!Number.isFinite(thresholdMs) || thresholdMs <= 0) return 0
   const active = await listActiveThreadCardBindings(workspaceId)
@@ -364,23 +466,35 @@ export async function autoDetachStaleReadyWorkers(
     const app: AppSlug = parsed.kind
     const entry = await getAppSessionEntry(app, parsed.ref).catch(() => null)
     const lastActivityAt = entry ? new Date(entry.mtimeMs).toISOString() : null
-    let reviewStatus: "live" | "ready-for-review" | "idle"
+    let reviewStatus: ReturnType<typeof computeReviewStatus>
     try {
       const tail = await getAppSessionTail(app, parsed.ref, 50)
       if ("error" in tail) {
-        reviewStatus = computeReviewStatus([], lastActivityAt)
+        reviewStatus = computeReviewStatus([], lastActivityAt, {
+          berthierReviewedAt: b.berthierReviewedAt,
+          humanApprovedAt: b.humanApprovedAt,
+        })
       } else {
-        reviewStatus = computeReviewStatus(tail.turns, lastActivityAt)
+        reviewStatus = computeReviewStatus(tail.turns, lastActivityAt, {
+          berthierReviewedAt: b.berthierReviewedAt,
+          humanApprovedAt: b.humanApprovedAt,
+        })
       }
     } catch {
-      reviewStatus = computeReviewStatus([], lastActivityAt)
+      reviewStatus = computeReviewStatus([], lastActivityAt, {
+        berthierReviewedAt: b.berthierReviewedAt,
+        humanApprovedAt: b.humanApprovedAt,
+      })
     }
-    if (reviewStatus !== "ready-for-review") continue
-    const minutes = Math.round(thresholdMs / 60_000)
+    // Only "berthier-reviewed" is eligible. The other interstitial
+    // tier ("candidate-self-believed") is explicitly off-limits to
+    // auto-detach regardless of age.
+    if (reviewStatus !== "berthier-reviewed") continue
+    const hours = Math.round(thresholdMs / 3_600_000)
     const ok = await detachThreadCardBinding(
       workspaceId,
       b.agentId,
-      `auto-detached after ${minutes}min ready-for-review`
+      `auto-detached after ${hours}h berthier-reviewed without human approval — re-spawn if wrongly accepted`
     )
     if (ok) detached += 1
   }

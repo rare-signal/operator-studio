@@ -1,28 +1,21 @@
 /**
- * pnpm os:worker-done --agent=<agentId> [--exec=<execId>] [--reason="..."] [--json]
+ * pnpm os:berthier-ack --agent=<agentId> [--exec=<execId>] [--reason="..."] [--json]
  *
- * Mark a spawned worker complete from Berthier's POV. Flips the
- * binding's detached_at = now so the worker:
- *   - drops out of the active rail (`pnpm os:workers`)
- *   - shows up under "recently completed" (collapsed; expand with --completed)
+ * Berthier explicitly acknowledges a worker's task_done. Sets
+ * `berthier_reviewed_at = now` on the binding WITHOUT detaching.
+ * The binding stays active so the cockpit can keep surfacing the
+ * "needs your eyes — Berthier already looked" pill until David taps
+ * Acknowledge or the auto-detach safety net fires after 24h.
  *
- * Plan-card status is NOT touched — a worker can be "complete" (binding
- * detached) while its plan card stays in-motion (e.g. Phase 1 done,
- * Phase 2 still gated on David's approval). Use `pnpm plan:card status`
- * separately if you also want to flip the card.
- *
- * Safety:
- *   - Verifies the binding belongs to the given exec before detaching
- *     (prevents accidentally detaching another exec's worker).
- *   - Pass --reason="..." to log the mark-complete rationale to stdout
- *     (and to the JSON output). The binding's original `rationale` is
- *     preserved as-is — per-detach reasons are stdout-only until we
- *     add a `detach_reason` column.
+ * This is the middle gate of the multi-tier review state machine
+ * (see kb-2026-05-10-multi-tier-review-state-machine). It exists
+ * specifically to surface the *interstitial risk* of work that
+ * Berthier looked at but David never validated.
  */
 
 import {
-  detachThreadCardBinding,
   getActiveBindingsSpawnedBy,
+  setBerthierReviewedAt,
 } from "@/lib/operator-studio/thread-card-bindings"
 import { GLOBAL_WORKSPACE_ID } from "@/lib/operator-studio/workspaces"
 import { getPgPool } from "@/lib/server/db/client"
@@ -47,7 +40,7 @@ function parseArgs(argv: string[]): Args {
     else if (a.startsWith("--reason=")) out.reason = a.slice(9)
     else if (a === "-h" || a === "--help") {
       console.error(
-        'usage: cockpit-mark-done --agent=<agentId> [--exec=<execId>] [--reason="..."] [--json]'
+        'usage: cockpit-berthier-ack --agent=<agentId> [--exec=<execId>] [--reason="..."] [--json]'
       )
       process.exit(0)
     }
@@ -58,11 +51,9 @@ function parseArgs(argv: string[]): Args {
 async function main() {
   const args = parseArgs(process.argv)
   if (!args.agent) {
-    console.error('error: --agent=<agentId> required (e.g. --agent=claude:cdd73e96-...)')
+    console.error("error: --agent=<agentId> required")
     process.exit(2)
   }
-
-  // Verify the binding actually belongs to this exec before detaching.
   const owned = await getActiveBindingsSpawnedBy(GLOBAL_WORKSPACE_ID, args.exec)
   const binding = owned.find((b) => b.agentId === args.agent)
   if (!binding) {
@@ -78,28 +69,22 @@ async function main() {
       console.error(
         `error: agent ${args.agent} is not currently active under exec ${args.exec}`
       )
-      console.error(`  (run \`pnpm os:workers\` to see what's active)`)
     }
     process.exit(1)
   }
-
-  // Multi-tier review (0034): worker-done is David's explicit
-  // sign-off. Set BOTH human_approved_at AND detached_at — the
-  // semantics of `pnpm os:worker-done` are "I approve + retire".
-  const detached = await detachThreadCardBinding(
+  const ok = await setBerthierReviewedAt(
     GLOBAL_WORKSPACE_ID,
     args.agent,
-    { reason: args.reason, humanApproved: true }
+    args.reason
   )
-  if (!detached) {
+  if (!ok) {
     if (args.json) {
-      console.log(JSON.stringify({ ok: false, error: "detach-failed" }, null, 2))
+      console.log(JSON.stringify({ ok: false, error: "ack-failed" }, null, 2))
     } else {
-      console.error("error: detach returned no rows (race? already detached?)")
+      console.error("error: berthier-ack returned no rows (race? already detached?)")
     }
     process.exit(1)
   }
-
   if (args.json) {
     console.log(
       JSON.stringify(
@@ -108,9 +93,7 @@ async function main() {
           exec: args.exec,
           agent: args.agent,
           planStepId: binding.planStepId,
-          source: binding.source,
-          spawnOrigin: binding.spawnOrigin,
-          markedAt: new Date().toISOString(),
+          berthierReviewedAt: new Date().toISOString(),
           reason: args.reason,
         },
         null,
@@ -119,13 +102,11 @@ async function main() {
     )
     return
   }
-
-  console.log(`✓ marked complete: ${args.agent}`)
+  console.log(`✓ berthier-ack: ${args.agent}`)
   console.log(`  step:   ${binding.planStepId}`)
-  console.log(`  origin: ${binding.spawnOrigin ?? "unknown"} via ${binding.source}`)
   if (args.reason) console.log(`  reason: ${args.reason}`)
   console.log("")
-  console.log("(worker dropped from active rail; visible under `pnpm os:workers --completed`)")
+  console.log("(binding stays active — needs your sign-off via `pnpm os:worker-done`)")
 }
 
 main()

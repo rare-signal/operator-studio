@@ -1025,6 +1025,20 @@ export const operatorThreadCardBindings = pgTable(
      *  `cockpit-mark-done --reason=...` or auto-detach). Null for
      *  bindings detached without a reason or pre-0032. */
     detachReason: text("detach_reason"),
+    /** Multi-tier review (0034): set when Berthier explicitly
+     *  acknowledges the worker's task_done ("I looked, looks
+     *  plausible, but you (David) should sign off"). Doesn't
+     *  detach. Null until acknowledged. */
+    berthierReviewedAt: timestamp("berthier_reviewed_at", {
+      withTimezone: true,
+    }),
+    /** Multi-tier review (0034): set when David explicitly signs
+     *  off. Terminal. `os:worker-done` sets this AND detached_at;
+     *  the cockpit "acknowledge as human-approved" affordance can
+     *  set it without detaching. Null until human-approved. */
+    humanApprovedAt: timestamp("human_approved_at", {
+      withTimezone: true,
+    }),
   },
   // The migration also creates a partial unique index on
   // (workspace_id, agent_id) WHERE detached_at IS NULL — drizzle's

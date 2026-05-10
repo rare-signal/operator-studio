@@ -1,13 +1,19 @@
 /**
- * Worker reviewStatus computation — shared between the cockpit
- * spawned-by route (renders the badge) and the auto-detach safety net
- * (detaches stale ready-for-review workers).
+ * Multi-tier worker reviewStatus computation. Per the
+ * `step-multi-tier-review-state-machine` plan card:
  *
- *   - "ready-for-review": last assistant turn matches the task_done
- *     power-string AND no user turn followed it (re-engagement flips
- *     back to live).
- *   - "idle": no recent activity within REVIEW_IDLE_THRESHOLD_MS.
- *   - "live": everything else.
+ *   - "live": recent activity, no task_done in last assistant turn.
+ *   - "candidate-self-believed" / "awaiting-berthier-check": task_done
+ *     posted (no later user turn) AND no Berthier acknowledgement on
+ *     the binding. Synonyms — compute emits "candidate-self-believed"
+ *     by default; the UI may relabel as "awaiting Berthier's eyes".
+ *   - "berthier-reviewed": Berthier acknowledged but David hasn't
+ *     signed off. Surfaces interstitial review risk.
+ *   - "human-approved": David explicitly signed off. Terminal.
+ *   - "idle": no task_done, no recent activity past N min.
+ *
+ * The two timestamps come from the binding row (set by
+ * `cockpit-berthier-ack` and `cockpit-mark-done` respectively).
  */
 
 import "server-only"
@@ -18,14 +24,43 @@ import {
 } from "@/lib/operator-studio/power-strings"
 import type { Turn } from "@/lib/server/agent-bridge/app-sessions"
 
-export type ReviewStatus = "live" | "ready-for-review" | "idle"
+export type ReviewStatus =
+  | "live"
+  | "candidate-self-believed"
+  | "awaiting-berthier-check"
+  | "berthier-reviewed"
+  | "human-approved"
+  | "idle"
 
 export const REVIEW_IDLE_THRESHOLD_MS = 5 * 60 * 1000
 
+/** Sort rank used by the cockpit drawer + spawned-by route. Lower is
+ *  higher in the list. David always sees what's NOT yet
+ *  human-approved at the top. */
+export const REVIEW_STATUS_RANK: Record<ReviewStatus, number> = {
+  "awaiting-berthier-check": 0,
+  "candidate-self-believed": 0,
+  "berthier-reviewed": 1,
+  live: 2,
+  idle: 3,
+  "human-approved": 4,
+}
+
+export interface ReviewStatusBindingState {
+  /** ISO timestamp; non-null = Berthier explicitly acknowledged. */
+  berthierReviewedAt?: string | null
+  /** ISO timestamp; non-null = David explicitly signed off. */
+  humanApprovedAt?: string | null
+}
+
 export function computeReviewStatus(
   turns: Turn[],
-  lastActivityAt: string | null
+  lastActivityAt: string | null,
+  binding: ReviewStatusBindingState = {}
 ): ReviewStatus {
+  // Terminal — David signed off. Wins regardless of subsequent activity.
+  if (binding.humanApprovedAt) return "human-approved"
+
   let lastAssistantIdx = -1
   let lastUserIdx = -1
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -35,19 +70,27 @@ export function computeReviewStatus(
     if (lastAssistantIdx >= 0 && lastUserIdx >= 0) break
   }
   const taskDoneSpec = getPowerStrings().find((s) => s.id === "task-done-token")
-  if (
-    taskDoneSpec &&
+  const hasTaskDone =
+    !!taskDoneSpec &&
     lastAssistantIdx >= 0 &&
-    lastAssistantIdx > lastUserIdx
-  ) {
-    const content = turns[lastAssistantIdx].parts
-      .filter((p): p is { kind: "text"; text: string } => p.kind === "text")
-      .map((p) => p.text)
-      .join("\n")
-    if (matchesPowerString(taskDoneSpec, "assistant", content)) {
-      return "ready-for-review"
-    }
+    lastAssistantIdx > lastUserIdx &&
+    matchesPowerString(
+      taskDoneSpec,
+      "assistant",
+      turns[lastAssistantIdx].parts
+        .filter((p): p is { kind: "text"; text: string } => p.kind === "text")
+        .map((p) => p.text)
+        .join("\n")
+    )
+
+  if (hasTaskDone) {
+    if (binding.berthierReviewedAt) return "berthier-reviewed"
+    return "candidate-self-believed"
   }
+
+  // Berthier acknowledged but the worker has since posted a non-done
+  // assistant turn (re-engagement). Treat as live — Berthier's prior
+  // ack no longer reflects current state.
   const ageMs = lastActivityAt
     ? Date.now() - Date.parse(lastActivityAt)
     : Number.POSITIVE_INFINITY

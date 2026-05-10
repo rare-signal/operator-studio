@@ -17,7 +17,13 @@ import type {
 } from "@/lib/server/agent-bridge/types"
 import type { AppStatus } from "@/lib/server/agent-bridge/app-sessions"
 
-type ReviewStatus = "live" | "ready-for-review" | "idle"
+type ReviewStatus =
+  | "live"
+  | "candidate-self-believed"
+  | "awaiting-berthier-check"
+  | "berthier-reviewed"
+  | "human-approved"
+  | "idle"
 
 interface SpawnedByWorker {
   agentId: string
@@ -33,12 +39,20 @@ interface SpawnedByWorker {
   title: string | null
   isLive: boolean
   reviewStatus: ReviewStatus
+  berthierReviewedAt?: string | null
+  humanApprovedAt?: string | null
 }
 
+// Multi-tier review sort: awaiting-berthier-check > berthier-reviewed
+// > live > idle > human-approved. Mirrors the server route so the
+// drawer order matches what /spawned-by returns.
 const REVIEW_STATUS_RANK: Record<ReviewStatus, number> = {
-  "ready-for-review": 0,
-  live: 1,
-  idle: 2,
+  "awaiting-berthier-check": 0,
+  "candidate-self-believed": 0,
+  "berthier-reviewed": 1,
+  live: 2,
+  idle: 3,
+  "human-approved": 4,
 }
 
 // ─── Cockpit lane view ────────────────────────────────────────────────────
@@ -102,6 +116,11 @@ export default function CockpitClient({
   const [maximizedAgentId, setMaximizedAgentId] =
     React.useState<AgentCompositeId | null>(null)
   const [hotMode, setHotMode] = React.useState<HotModeStatus | null>(null)
+  // Multi-tier review (0034): when David taps a `berthier-reviewed`
+  // worker's pill, hold the agent id here to render the
+  // human-approval modal. Null = no modal showing.
+  const [ackModalAgentId, setAckModalAgentId] =
+    React.useState<AgentCompositeId | null>(null)
 
   // Hot-mode polling (mirror of BentoView).
   React.useEffect(() => {
@@ -322,8 +341,20 @@ export default function CockpitClient({
         seenReviewStatus.current.set(w.agentId, w.reviewStatus)
         continue
       }
-      if (prev !== "ready-for-review" && w.reviewStatus === "ready-for-review") {
-        sound.fire("thread_rest", `ready-for-review:${w.agentId}:${w.lastActivityAt ?? w.spawnedAt}`)
+      // Fire when the worker enters a tier that wants eyes — both
+      // candidate-self-believed (needs Berthier) and berthier-reviewed
+      // (needs David). Don't re-fire on transitions BETWEEN these
+      // attention-wanting tiers; only on entry from live/idle.
+      const wantsEyes =
+        w.reviewStatus === "candidate-self-believed" ||
+        w.reviewStatus === "awaiting-berthier-check" ||
+        w.reviewStatus === "berthier-reviewed"
+      const previouslyWantedEyes =
+        prev === "candidate-self-believed" ||
+        prev === "awaiting-berthier-check" ||
+        prev === "berthier-reviewed"
+      if (wantsEyes && !previouslyWantedEyes) {
+        sound.fire("thread_rest", `wants-eyes:${w.reviewStatus}:${w.agentId}:${w.lastActivityAt ?? w.spawnedAt}`)
       }
       seenReviewStatus.current.set(w.agentId, w.reviewStatus)
     }
@@ -565,10 +596,106 @@ export default function CockpitClient({
                 workerSequenceByAgentId={workerSequenceByAgentId}
                 reviewStatusByAgentId={reviewStatusByAgentId}
                 onPick={(id) => setWorkerId(id)}
+                onTapBerthierReviewedPill={(id) => setAckModalAgentId(id)}
               />
             </Pane>
           </>
         )}
+      </div>
+      {ackModalAgentId && (
+        <ReviewAckModal
+          agentId={ackModalAgentId}
+          onClose={() => setAckModalAgentId(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+function ReviewAckModal({
+  agentId,
+  onClose,
+}: {
+  agentId: AgentCompositeId
+  onClose: () => void
+}) {
+  const [busy, setBusy] = React.useState(false)
+  const [err, setErr] = React.useState<string | null>(null)
+  async function call(action: "human-approve" | "send-back", detach: boolean) {
+    setBusy(true)
+    setErr(null)
+    try {
+      const r = await fetch("/api/operator-studio/cockpit/review-tier", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentId, action, detach }),
+      })
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}))
+        throw new Error(j?.error ?? `HTTP ${r.status}`)
+      }
+      onClose()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="w-full sm:max-w-md bg-white dark:bg-stone-900 rounded-t-xl sm:rounded-xl border border-stone-200 dark:border-stone-700 p-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-[13px] font-semibold text-stone-900 dark:text-stone-100">
+          Berthier reviewed this — your turn
+        </div>
+        <div className="mt-1 text-[11.5px] text-stone-500">
+          Berthier already looked. You haven&apos;t signed off yet. Mistakes
+          only you can catch live in this gap.
+        </div>
+        {err && (
+          <div className="mt-2 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300">
+            {err}
+          </div>
+        )}
+        <div className="mt-3 flex flex-col gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => call("human-approve", true)}
+            className="w-full inline-flex justify-center px-3 py-2 rounded text-[12.5px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            Approve & retire worker
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => call("human-approve", false)}
+            className="w-full inline-flex justify-center px-3 py-2 rounded text-[12.5px] font-semibold bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 disabled:opacity-50"
+          >
+            Approve, keep worker active
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => call("send-back", false)}
+            className="w-full inline-flex justify-center px-3 py-2 rounded text-[12.5px] font-semibold bg-stone-100 text-stone-800 hover:bg-stone-200 dark:bg-stone-800 dark:text-stone-200 disabled:opacity-50"
+          >
+            Send back for revision
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onClose}
+            className="w-full inline-flex justify-center px-3 py-2 rounded text-[11.5px] text-stone-500 hover:text-stone-700"
+          >
+            Cancel
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -734,11 +861,13 @@ function WorkersList({
   workerSequenceByAgentId,
   reviewStatusByAgentId,
   onPick,
+  onTapBerthierReviewedPill,
 }: {
   workers: AgentListItem[]
   workerSequenceByAgentId: Map<string, number>
   reviewStatusByAgentId?: Map<string, ReviewStatus>
   onPick: (id: AgentCompositeId) => void
+  onTapBerthierReviewedPill?: (id: AgentCompositeId) => void
 }) {
   return (
     <div>
@@ -746,15 +875,23 @@ function WorkersList({
         Workers spawned by exec
       </div>
       <ul className="divide-y divide-stone-200 dark:divide-stone-800">
-        {workers.map((a) => (
-          <AgentRow
-            key={a.id}
-            agent={a}
-            workerSequence={workerSequenceByAgentId.get(a.id) ?? null}
-            reviewStatus={reviewStatusByAgentId?.get(a.id) ?? null}
-            onPick={onPick}
-          />
-        ))}
+        {workers.map((a) => {
+          const tier = reviewStatusByAgentId?.get(a.id) ?? null
+          return (
+            <AgentRow
+              key={a.id}
+              agent={a}
+              workerSequence={workerSequenceByAgentId.get(a.id) ?? null}
+              reviewStatus={tier}
+              onPick={onPick}
+              onTapPill={
+                tier === "berthier-reviewed" && onTapBerthierReviewedPill
+                  ? onTapBerthierReviewedPill
+                  : undefined
+              }
+            />
+          )
+        })}
       </ul>
     </div>
   )
@@ -765,29 +902,48 @@ function AgentRow({
   workerSequence,
   reviewStatus,
   onPick,
+  onTapPill,
 }: {
   agent: AgentListItem
   workerSequence?: number | null
   reviewStatus?: ReviewStatus | null
   onPick: (id: AgentCompositeId) => void
+  onTapPill?: (id: AgentCompositeId) => void
 }) {
-  const isReady = reviewStatus === "ready-for-review"
-  const isIdle = reviewStatus === "idle"
-  // Distinct visual treatment per reviewStatus:
-  //   ready-for-review → bright amber highlight band + pill
-  //   live             → existing pulsing dot behavior
-  //   idle             → muted dot + dim row
-  const rowBg = isReady
+  const tier: ReviewStatus = reviewStatus ?? "live"
+  const isAwaitingBerthier =
+    tier === "candidate-self-believed" || tier === "awaiting-berthier-check"
+  const isBerthierReviewed = tier === "berthier-reviewed"
+  const isHumanApproved = tier === "human-approved"
+  const isIdle = tier === "idle"
+  // Distinct visual treatment per multi-tier reviewStatus (0034):
+  //   awaiting-berthier-check  → yellow band + pill (needs Berthier's eyes)
+  //   berthier-reviewed        → amber band + pill (needs YOUR eyes)
+  //   human-approved           → muted green check, dim
+  //   live                     → existing pulsing dot
+  //   idle                     → muted
+  const rowBg = isAwaitingBerthier
+    ? "bg-yellow-50 dark:bg-yellow-950/40 ring-1 ring-yellow-300 dark:ring-yellow-700"
+    : isBerthierReviewed
     ? "bg-amber-50 dark:bg-amber-950/40 ring-1 ring-amber-300 dark:ring-amber-700"
+    : isHumanApproved
+    ? "opacity-60"
     : ""
-  const dotClass = isReady
+  const dotClass = isAwaitingBerthier
+    ? "bg-yellow-500"
+    : isBerthierReviewed
     ? "bg-amber-500"
+    : isHumanApproved
+    ? "bg-emerald-600"
     : isIdle
     ? "bg-stone-300 dark:bg-stone-600"
     : agent.isLive
     ? "bg-emerald-500 animate-pulse"
     : "bg-stone-400"
-  const titleDim = isIdle ? "text-stone-500 dark:text-stone-500" : "text-stone-900 dark:text-stone-100"
+  const titleDim =
+    isIdle || isHumanApproved
+      ? "text-stone-500 dark:text-stone-500"
+      : "text-stone-900 dark:text-stone-100"
   return (
     <li>
       <button
@@ -809,9 +965,30 @@ function AgentRow({
               ? ` · Worker ${workerSequence}`
               : ""}
           </span>
-          {isReady && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/60 text-[9.5px] font-semibold uppercase tracking-wider text-amber-900 dark:text-amber-200">
-              ✓ awaiting your review
+          {isAwaitingBerthier && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-yellow-200 dark:bg-yellow-900/60 text-[9.5px] font-semibold uppercase tracking-wider text-yellow-900 dark:text-yellow-200">
+              needs Berthier&apos;s eyes
+            </span>
+          )}
+          {isBerthierReviewed && (
+            <span
+              role={onTapPill ? "button" : undefined}
+              onClick={
+                onTapPill
+                  ? (e) => {
+                      e.stopPropagation()
+                      onTapPill(agent.id)
+                    }
+                  : undefined
+              }
+              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/60 text-[9.5px] font-semibold uppercase tracking-wider text-amber-900 dark:text-amber-200 ${onTapPill ? "cursor-pointer hover:bg-amber-300 dark:hover:bg-amber-800" : ""}`}
+            >
+              needs your eyes — Berthier looked
+            </span>
+          )}
+          {isHumanApproved && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-[9.5px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
+              ✓ approved
             </span>
           )}
           <span className="ml-auto text-[10px] text-stone-500">
