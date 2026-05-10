@@ -177,7 +177,21 @@ const KEY_SCRIPTS: Record<string, string> = {
 export async function setClaudeBypassPermissionMode(): Promise<
   { ok: true } | { ok: false; error: string }
 > {
-  const toggle = await runCommand(
+  // Split the bypass dance into THREE independently-timeable osascript
+  // calls so a hang in one step doesn't lock up the whole spawn:
+  //   (a) keystroke phase: open picker + navigate + confirm + dismiss
+  //   (b) focus phase: AX-query Claude's window for position/size + click
+  //   (c) recovery phase (only on keystroke failure): Escape to dismiss
+  //       any modal left lingering, so sendToApp's paste doesn't land
+  //       in a picker filter or stray dialog
+  // The keystroke phase is dominant + reliable; the focus phase is the
+  // AX-query-dependent slow path that occasionally hangs (suspected:
+  // macOS Accessibility going to sleep after long idle). If focus
+  // fails, sendToApp's activate-then-paste is usually enough to land
+  // the prompt anyway, so we log + continue rather than fail the spawn.
+  const t0 = Date.now()
+
+  const keystrokeResult = await runCommand(
     "osascript",
     [
       "-e",
@@ -185,57 +199,108 @@ export async function setClaudeBypassPermissionMode(): Promise<
       "-e",
       `  keystroke "m" using {command down, shift down}`,
       "-e",
-      `  delay 1.0`, // wait for picker to fully render + accept input
+      `  delay 1.0`,
       "-e",
-      `  key code 126`, // Up — wraps from item 1 to item 5 (Bypass)
+      `  key code 126`, // Up wraps to last item = Bypass
       "-e",
       `  delay 0.25`,
       "-e",
-      `  keystroke return`, // confirm Bypass selection, picker dismisses
+      `  keystroke return`, // confirm Bypass
       "-e",
-      `  delay 0.6`, // let any "are you sure" confirmation dialog appear
+      `  delay 0.6`,
       "-e",
-      `  keystroke return`, // press default button on dialog; harmless newline on empty composer if no dialog
-      "-e",
-      `  delay 0.5`, // let dialog close + focus state settle
-      // After bypass is set, focus does NOT return to the chat input
-      // — David verified this. We have to explicitly click into the
-      // composer area or the subsequent sendToApp paste lands in the
-      // wrong place and no JSONL gets created. Click 80px above the
-      // window's bottom edge, horizontally centered — that's reliably
-      // inside Claude Desktop's composer regardless of window size.
-      "-e",
-      `  tell process "Claude"`,
-      "-e",
-      `    set fp to position of front window`,
-      "-e",
-      `    set fs to size of front window`,
-      "-e",
-      `    set clickX to (item 1 of fp) + ((item 1 of fs) / 2)`,
-      "-e",
-      `    set clickY to (item 2 of fp) + (item 2 of fs) - 80`,
-      "-e",
-      `    click at {clickX, clickY}`,
-      "-e",
-      `  end tell`,
-      "-e",
-      `  delay 0.3`, // let the click register + cursor land in input
+      `  keystroke return`, // dismiss any "are you sure" dialog (or harmless newline)
       "-e",
       `end tell`,
     ],
-    { timeoutMs: 6000 }
+    { timeoutMs: 4000 }
   )
-  if (toggle.code !== 0) {
+
+  if (keystrokeResult.code !== 0) {
+    const elapsed = Date.now() - t0
+    console.warn(
+      `[bypass-mode] keystroke phase failed in ${elapsed}ms: ${
+        keystrokeResult.stderr.trim() || "[timeout/unknown]"
+      }`
+    )
+    // Recovery: press Escape so any half-open picker doesn't eat the
+    // subsequent sendToApp paste.
+    await runCommand(
+      "osascript",
+      ["-e", `tell application "System Events" to key code 53`],
+      { timeoutMs: 1500 }
+    ).catch(() => null)
     return {
       ok: false,
-      error: `bypass-mode toggle failed: ${
-        toggle.stderr.trim() || "unknown"
-      } — Accessibility permission needed.`,
+      error: `bypass-mode keystroke phase failed: ${
+        keystrokeResult.stderr.trim() || "[timeout]"
+      }`,
     }
   }
-  // JS-side settle so picker dismiss animation + focus restore finish
-  // before the caller's next action (Cmd+N or paste).
-  await new Promise((r) => setTimeout(r, 500))
+
+  // Brief settle so picker dismiss + dialog close finish before AX query.
+  await new Promise((r) => setTimeout(r, 250))
+
+  // Focus phase: AX-based click into composer to restore input focus.
+  // The picker dismiss does NOT auto-restore input focus, so without
+  // this click the subsequent paste lands in the wrong place and the
+  // spawn fails (no JSONL).
+  //
+  // Failure mode (2026-05-10): macOS Accessibility can be sleepy and
+  // the `position of front window` AX query sometimes hangs for >2s
+  // even after a warm-up call. Mitigation: TWO attempts at the AX
+  // click. First attempt with a 3s timeout (covers the sleepy path).
+  // If first times out, retry once with 5s. If second also times out,
+  // log + continue — sendToApp attempts focus recovery on activate.
+  const focusScript = [
+    "-e",
+    `tell application "System Events"`,
+    "-e",
+    `  tell process "Claude"`,
+    "-e",
+    `    set fp to position of front window`,
+    "-e",
+    `    set fs to size of front window`,
+    "-e",
+    `    set clickX to (item 1 of fp) + ((item 1 of fs) / 2)`,
+    "-e",
+    `    set clickY to (item 2 of fp) + (item 2 of fs) - 80`,
+    "-e",
+    `    click at {clickX, clickY}`,
+    "-e",
+    `  end tell`,
+    "-e",
+    `end tell`,
+  ]
+  let focusResult = await runCommand("osascript", focusScript, {
+    timeoutMs: 3000,
+  })
+  if (focusResult.code !== 0) {
+    const firstElapsed = Date.now() - t0
+    console.warn(
+      `[bypass-mode] AX click attempt 1 failed at ${firstElapsed}ms (${
+        focusResult.stderr.trim() || "[timeout]"
+      }) — retrying with longer budget`
+    )
+    focusResult = await runCommand("osascript", focusScript, {
+      timeoutMs: 5000,
+    })
+    if (focusResult.code !== 0) {
+      console.warn(
+        `[bypass-mode] AX click retry also failed (${
+          focusResult.stderr.trim() || "[timeout]"
+        }) — sendToApp will attempt focus recovery`
+      )
+    } else {
+      console.log(
+        `[bypass-mode] AX click succeeded on retry at ${Date.now() - t0}ms`
+      )
+    }
+  }
+
+  const totalElapsed = Date.now() - t0
+  console.log(`[bypass-mode] full sequence completed in ${totalElapsed}ms`)
+  await new Promise((r) => setTimeout(r, 300))
   return { ok: true }
 }
 
