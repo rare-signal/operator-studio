@@ -247,30 +247,29 @@ export async function createNewAppSessionAndSend(
   }
   await new Promise((r) => setTimeout(r, adapter.postShortcutDelayMs))
 
-  // Switch the FRESHLY-OPENED new chat to bypass-permissions mode
-  // BEFORE pasting the prompt. This must happen AFTER Cmd+N (so the
-  // keystroke targets the new chat, not the previously-shown one) and
-  // BEFORE the paste (so the worker's first action sees bypass).
+  // BREAK-GLASS comprehensive bypass-permissions solve (2026-05-10):
+  // Claude Desktop's spawned `claude` subprocess reads project-scoped
+  // `.claude/settings.json` on startup (verified via process-list
+  // inspection: each subprocess shows `--setting-sources=user,project,
+  // local --permission-mode bypassPermissions --allow-dangerously-skip-
+  // permissions`). Setting `permissions.defaultMode = "bypassPermissions"`
+  // in `.claude/settings.json` at the project root makes every new
+  // chat opened in this project start in bypass mode automatically —
+  // no keystroke automation needed.
   //
-  // Earlier attempts placed this BEFORE Cmd+N, relying on bypass
-  // propagating from one chat to all subsequent new chats in the app
-  // session. That works only when the user hasn't reset Claude's
-  // default mode for new threads. With the default reset to ask-
-  // permissions (the more common case for fresh app launches), the
-  // new chat ignores the previous chat's mode and starts at ask.
+  // The keystroke-based toggle (`setClaudeBypassPermissionMode`) is
+  // kept in lib/server/agent-bridge/app-control.ts as a fallback for
+  // sessions opened OUTSIDE a project that has settings.json
+  // configured. Default OFF; opt in with OPERATOR_STUDIO_AUTO_BYPASS=1.
   //
-  // Picker handling lives in setClaudeBypassPermissionMode — generous
-  // delays + Up x 5 (defensive ceiling-clamp) + Down x 4 to land on
-  // Bypass + Enter to confirm. ~3.5s total.
-  //
-  // Codex skipped (no equivalent picker). Failure is non-fatal —
-  // worker still spawns at default permission level if anything goes
-  // wrong; David babysits prompts in that case.
-  //
-  // Set OPERATOR_STUDIO_AUTO_BYPASS=0 to disable.
+  // History: the keystroke automation was the primary path through
+  // multiple bug-hunting iterations on 2026-05-09/10. It works when
+  // it works but is brittle (depends on Accessibility permission +
+  // picker timing + window focus state). Settings.json is the
+  // structural answer.
   if (
     args.appKind === "claude" &&
-    process.env.OPERATOR_STUDIO_AUTO_BYPASS !== "0"
+    process.env.OPERATOR_STUDIO_AUTO_BYPASS === "1"
   ) {
     const bypass = await setClaudeBypassPermissionMode()
     if (!bypass.ok) {
