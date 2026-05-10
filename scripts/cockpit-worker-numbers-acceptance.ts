@@ -10,6 +10,8 @@
  * red. One fetch, one assert chain, exit — no dev-server side effects.
  */
 
+export {}
+
 const DEFAULT_EXEC = "claude:2526ed14-5a7c-4f2c-ae8b-8444b13cb2c6"
 const BASE_URL = process.env.OS_BASE_URL || "http://localhost:4200"
 

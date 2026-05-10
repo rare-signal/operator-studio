@@ -102,7 +102,7 @@ async function listAllJsonl(
   return out
 }
 
-async function firstUserText(file: string, app: AppSlug): Promise<string | null> {
+export async function firstUserText(file: string, app: AppSlug): Promise<string | null> {
   let handle: fs.FileHandle
   try {
     handle = await fs.open(file, "r")
@@ -183,6 +183,40 @@ export async function listAppSessions(
     })
   }
   return entries
+}
+
+/** Look up a single session entry by id regardless of recency window.
+ *  Used by /api/operator-studio/cockpit/spawned-by to enrich worker
+ *  bindings whose JSONL has aged past the top-N recent list. Returns
+ *  null when the JSONL has been deleted. */
+export async function getAppSessionEntry(
+  app: AppSlug,
+  sessionId: string
+): Promise<AppSessionEntry | null> {
+  const found = await findAppSessionFile(app, sessionId)
+  if (!found) return null
+  let sizeBytes = 0
+  try {
+    const st = await fs.stat(found.file)
+    sizeBytes = st.size
+  } catch {
+    return null
+  }
+  const title = await firstUserText(found.file, app)
+  const project = path.basename(path.dirname(found.file))
+  const now = Date.now()
+  const mtimeAgeMs = Math.max(0, now - found.mtimeMs)
+  return {
+    id: sessionId,
+    app,
+    project: project ? project.replace(/^-/, "") : null,
+    title,
+    mtimeMs: found.mtimeMs,
+    mtimeAgeMs,
+    sizeBytes,
+    isLive: mtimeAgeMs < 5000,
+    file: found.file,
+  }
 }
 
 // Path cache: keyed by `${app}:${sessionId}`. JSONL files don't move

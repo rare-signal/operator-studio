@@ -13,7 +13,24 @@ import { useSound } from "../components/sound-context"
 import type {
   AgentListItem,
   AgentCompositeId,
+  AgentKind,
 } from "@/lib/server/agent-bridge/types"
+import type { AppStatus } from "@/lib/server/agent-bridge/app-sessions"
+
+interface SpawnedByWorker {
+  agentId: string
+  sequence: number
+  active: boolean
+  spawnedAt: string
+  agentKind: string
+  label: string | null
+  source: "claude" | "codex" | "tmux"
+  lastActivityAt: string | null
+  status: AppStatus
+  project: string | null
+  title: string | null
+  isLive: boolean
+}
 
 // ─── Cockpit lane view ────────────────────────────────────────────────────
 // First-principles: copy the Bento focused-mobile shell verbatim, then
@@ -79,14 +96,10 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
     }
   }, [])
 
-  // Recent-agents polling (same endpoint + shape as BentoView).
-  // Bumped appLimit from default 8 → 40 (the route's max) so that
-  // spawned-by-exec workers don't disappear from the cockpit drawer
-  // when they age past the top-8 recency window. Workers 7 + 9 went
-  // missing on 2026-05-10 because overnight smoke spawns pushed them
-  // off the recent-8 list. This is a band-aid; the proper fix is to
-  // always include spawned-by metadata regardless of recency. Carded
-  // separately as `step-cockpit-spawned-by-recency-independence`.
+  // Recent-agents polling — drives the top-level pick list (no exec
+  // chosen yet). The spawned-by drawer no longer intersects against
+  // this list; it consumes /cockpit/spawned-by directly so aged
+  // workers stay visible as long as their binding is active.
   React.useEffect(() => {
     let alive = true
     async function poll() {
@@ -125,16 +138,12 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
   // until this exec actually originates a worker (binding rows are
   // written at spawn time by /agents/new-session when the caller
   // passes spawnedByAgentId — e.g. the cockpit). No heuristic.
-  const [spawnedAgentIds, setSpawnedAgentIds] = React.useState<Set<string>>(
-    new Set()
-  )
-  const [workerSequenceByAgentId, setWorkerSequenceByAgentId] = React.useState<
-    Map<string, number>
-  >(new Map())
+  const [spawnedByWorkers, setSpawnedByWorkers] = React.useState<
+    SpawnedByWorker[]
+  >([])
   React.useEffect(() => {
     if (!execId) {
-      setSpawnedAgentIds(new Set())
-      setWorkerSequenceByAgentId(new Map())
+      setSpawnedByWorkers([])
       return
     }
     let alive = true
@@ -147,21 +156,10 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
         if (!r.ok) return
         const data = (await r.json()) as {
           agentIds?: string[]
-          workers?: Array<{ agentId: string; sequence: number }>
+          workers?: SpawnedByWorker[]
         }
-        const ids = Array.isArray(data?.agentIds) ? data.agentIds : []
-        const seqMap = new Map<string, number>()
-        if (Array.isArray(data?.workers)) {
-          for (const w of data.workers) {
-            if (typeof w?.agentId === "string" && typeof w?.sequence === "number") {
-              seqMap.set(w.agentId, w.sequence)
-            }
-          }
-        }
-        if (alive) {
-          setSpawnedAgentIds(new Set(ids))
-          setWorkerSequenceByAgentId(seqMap)
-        }
+        const workers = Array.isArray(data?.workers) ? data.workers : []
+        if (alive) setSpawnedByWorkers(workers)
       } catch {
         /* ignore */
       }
@@ -178,13 +176,33 @@ export default function CockpitClient({ initialExecAgentId }: CockpitClientProps
     () => agents.find((a) => a.id === execId) ?? null,
     [agents, execId]
   )
-  const spawnedWorkers = React.useMemo(
-    () =>
-      execId
-        ? agents.filter((a) => a.id !== execId && spawnedAgentIds.has(a.id))
-        : [],
-    [agents, execId, spawnedAgentIds]
-  )
+  const spawnedWorkers = React.useMemo<AgentListItem[]>(() => {
+    if (!execId) return []
+    return spawnedByWorkers
+      .filter((w) => w.active && w.agentId !== execId)
+      .map((w) => {
+        const kind: AgentKind =
+          w.source === "tmux" || w.source === "claude" || w.source === "codex"
+            ? w.source
+            : "claude"
+        return {
+          id: w.agentId as AgentCompositeId,
+          kind,
+          label: w.label ?? w.agentId.split(":").slice(1).join(":").slice(0, 8),
+          source: w.source,
+          lastActivityAt: w.lastActivityAt ?? w.spawnedAt,
+          status: w.status,
+          project: w.project,
+          title: w.title,
+          isLive: w.isLive,
+        }
+      })
+  }, [spawnedByWorkers, execId])
+  const workerSequenceByAgentId = React.useMemo(() => {
+    const m = new Map<string, number>()
+    for (const w of spawnedByWorkers) m.set(w.agentId, w.sequence)
+    return m
+  }, [spawnedByWorkers])
   const worker = spawnedWorkers.find((a) => a.id === workerId) ?? null
 
   // ── Attention sounds: rest vs in-flight ──────────────────────────
