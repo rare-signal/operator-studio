@@ -1,14 +1,29 @@
 "use client"
 
 import * as React from "react"
-import { useSearchParams } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { useTheme } from "next-themes"
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/registry/new-york-v4/ui/popover"
+import {
+  Activity,
+  AlertCircle,
   ArrowLeft,
+  Check,
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Clock,
   Home,
+  ListChecks,
+  Menu,
+  Moon,
+  MoreHorizontal,
   Plus,
+  Sun,
   X,
 } from "lucide-react"
 
@@ -26,6 +41,18 @@ import type {
   AgentKind,
 } from "@/lib/server/agent-bridge/types"
 import type { AppStatus } from "@/lib/server/agent-bridge/app-sessions"
+import {
+  WORKER_STATUS_VISUAL,
+  isActiveStatus,
+} from "@/lib/operator-studio/worker-status-visuals"
+import {
+  deriveWorkerHandle,
+  workerHandleStorageKey,
+} from "@/lib/operator-studio/worker-label"
+import {
+  activityBands,
+  type WorkerActivityBreakdown,
+} from "@/lib/operator-studio/worker-activity-breakdown"
 
 // Mirrors `LaneTaskCard` from `lib/operator-studio/work-lane-tasks.ts`.
 // Inlined here to keep this client component free of server-only
@@ -99,6 +126,23 @@ interface SpawnedByWorker {
    *  "CLI quota baseline"). Beats the JSONL kickoff title for telling
    *  workers apart in the rail at a glance. Falls back when null. */
   planStepTitle?: string | null
+  /** Operator-set codename parsed from binding.rationale on workers
+   *  spawned via scripts/spawn-cockpit-worker.ts (--label=...). Punchy
+   *  2-3 word descriptor ("perf hawk", "chat polish") for at-a-glance
+   *  rail identification. Highest-priority label when present. */
+  codename?: string | null
+  /** Where the session lives. Drives the CLI / Desktop badge in the
+   *  rail so David can tell at a glance which threads are CLI-bound
+   *  vs the legacy Claude/Codex Desktop AX surface. */
+  surface: "claude-cli" | "codex-cli" | "desktop"
+  /** Name of the tool the worker is currently running, when status is
+   *  `tool-running` and the latest tool_use has no matching
+   *  tool_result yet. Drives the "▶ Bash" inline tag in the rail. */
+  currentTool?: string | null
+  /** Aggregated time-bucket breakdown since spawn — drives the
+   *  stacked-segment background bar on each row. Null when the JSONL
+   *  tail can't be parsed or the binding is inactive. */
+  activityBreakdown?: WorkerActivityBreakdown | null
 }
 
 // Multi-tier review sort: awaiting-berthier-check > berthier-reviewed
@@ -250,8 +294,14 @@ export default function CockpitClient({
   // user's explicit picks; the param is just another input that calls
   // selectLane like any tap on the lane card would.
   const searchParams = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
   const queryLaneId = searchParams?.get("lane") ?? null
+  const queryWorkerId = searchParams?.get("worker") ?? null
+  const queryMaxId = searchParams?.get("max") ?? null
   const lastAppliedQueryLaneRef = React.useRef<string | null>(null)
+  const lastAppliedQueryWorkerRef = React.useRef<string | null>(null)
+  const lastAppliedQueryMaxRef = React.useRef<string | null>(null)
   React.useEffect(() => {
     if (!queryLaneId) return
     if (lastAppliedQueryLaneRef.current === queryLaneId) return
@@ -274,6 +324,56 @@ export default function CockpitClient({
   const [agents, setAgents] = React.useState<AgentListItem[]>([])
   const [agentsError, setAgentsError] = React.useState<string | null>(null)
   const [workerId, setWorkerId] = React.useState<AgentCompositeId | null>(null)
+  // Cached Marshal binding for the active lane so the chat pane can
+  // render the Marshal thread when David taps the Marshal row's name
+  // area. spawnedByWorkers excludes marshal-role bindings (intentional
+  // for the rail), so without this fallback the `worker` lookup at
+  // line ~614 returns null and the pane renders nothing. Fetched once
+  // per lane change; MarshalRegion does its own independent fetch for
+  // its own rendering — minor duplication, acceptable for now.
+  const [cockpitMarshalAgentId, setCockpitMarshalAgentId] = React.useState<
+    string | null
+  >(null)
+  const [cockpitMarshalTitle, setCockpitMarshalTitle] = React.useState<
+    string | null
+  >(null)
+  React.useEffect(() => {
+    if (!activeLane?.id) {
+      setCockpitMarshalAgentId(null)
+      setCockpitMarshalTitle(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const r = await fetch(
+          `/api/operator-studio/work-lanes/${activeLane.id}/marshal`,
+          { cache: "no-store" }
+        )
+        if (!r.ok) {
+          if (!cancelled) {
+            setCockpitMarshalAgentId(null)
+            setCockpitMarshalTitle(null)
+          }
+          return
+        }
+        const j = (await r.json()) as {
+          marshal: { agentId: string; title?: string | null } | null
+        }
+        if (cancelled) return
+        setCockpitMarshalAgentId(j.marshal?.agentId ?? null)
+        setCockpitMarshalTitle(j.marshal?.title ?? null)
+      } catch {
+        if (!cancelled) {
+          setCockpitMarshalAgentId(null)
+          setCockpitMarshalTitle(null)
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [activeLane?.id])
   const [execCollapsed, setExecCollapsed] = React.useState(false)
   // Maximize-pane state for the 50/50 split. Holds the agent id of the
   // pane the user wants to view full-viewport. null = normal split. Cleared
@@ -281,6 +381,76 @@ export default function CockpitClient({
   // exec swapped) so we never get stuck rendering nothing.
   const [maximizedAgentId, setMaximizedAgentId] =
     React.useState<AgentCompositeId | null>(null)
+
+  // URL deep-linking for refresh restore. Reads `?worker=<id>` and
+  // `?max=<id>` once on first match (mirrors the existing `?lane=`
+  // reader above) and writes the trio back to the URL via
+  // router.replace whenever state changes. Refresh is a no-op:
+  // browser keeps the URL, mount applies it.
+  React.useEffect(() => {
+    if (!queryWorkerId) return
+    if (lastAppliedQueryWorkerRef.current === queryWorkerId) return
+    lastAppliedQueryWorkerRef.current = queryWorkerId
+    setWorkerId(queryWorkerId as AgentCompositeId)
+  }, [queryWorkerId])
+  React.useEffect(() => {
+    if (!queryMaxId) return
+    if (lastAppliedQueryMaxRef.current === queryMaxId) return
+    lastAppliedQueryMaxRef.current = queryMaxId
+    setMaximizedAgentId(queryMaxId as AgentCompositeId)
+  }, [queryMaxId])
+  // Exiting a lane (backToLanes) drops worker + max so URL doesn't
+  // carry stale params into the picker / next lane. Only fire on the
+  // non-null → null transition; firing on initial mount would clobber
+  // the worker/max readers' queued updates from `?worker=` / `?max=`.
+  const prevActiveLaneIdRef = React.useRef<string | null>(activeLaneId)
+  React.useEffect(() => {
+    const prev = prevActiveLaneIdRef.current
+    prevActiveLaneIdRef.current = activeLaneId
+    if (prev !== null && activeLaneId === null) {
+      setWorkerId(null)
+      setMaximizedAgentId(null)
+    }
+  }, [activeLaneId])
+  // Writer: mirror state → URL. Gated on `lanesLoaded` AND a
+  // one-pass arm so the first effect cycle after lanes load doesn't
+  // wipe `?lane=X` / `?worker=Y` / `?max=Z` before the readers above
+  // have flushed their queued state updates on cold load.
+  const writerArmedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (typeof window === "undefined") return
+    if (!lanesLoaded) return
+    if (!writerArmedRef.current) {
+      writerArmedRef.current = true
+      return
+    }
+    const params = new URLSearchParams(window.location.search)
+    if (activeLaneId) params.set("lane", activeLaneId)
+    else params.delete("lane")
+    if (workerId) params.set("worker", workerId)
+    else params.delete("worker")
+    if (maximizedAgentId) params.set("max", maximizedAgentId)
+    else params.delete("max")
+    const qs = params.toString()
+    const target = qs ? `${pathname}?${qs}` : pathname
+    const current = `${pathname}${window.location.search}`
+    if (target === current) return
+    // Sync the reader gates so they don't redundantly re-apply state
+    // we just wrote out. Setting to current state value (incl. null)
+    // means the next external URL change still triggers the reader.
+    lastAppliedQueryLaneRef.current = activeLaneId
+    lastAppliedQueryWorkerRef.current = workerId
+    lastAppliedQueryMaxRef.current = maximizedAgentId
+    router.replace(target, { scroll: false })
+  }, [
+    activeLaneId,
+    workerId,
+    maximizedAgentId,
+    lanesLoaded,
+    pathname,
+    router,
+  ])
+
   const [hotMode, setHotMode] = React.useState<HotModeStatus | null>(null)
   // Multi-tier review (0034): when David taps a `berthier-reviewed`
   // worker's pill, hold the agent id here to render the
@@ -392,9 +562,13 @@ export default function CockpitClient({
   const [spawnedByWorkers, setSpawnedByWorkers] = React.useState<
     SpawnedByWorker[]
   >([])
+  const [execSurfaceFromApi, setExecSurfaceFromApi] = React.useState<
+    "claude-cli" | "codex-cli" | "desktop" | null
+  >(null)
   React.useEffect(() => {
     if (!execId) {
       setSpawnedByWorkers([])
+      setExecSurfaceFromApi(null)
       return
     }
     let alive = true
@@ -408,9 +582,13 @@ export default function CockpitClient({
         const data = (await r.json()) as {
           agentIds?: string[]
           workers?: SpawnedByWorker[]
+          execSurface?: "claude-cli" | "codex-cli" | "desktop" | null
         }
         const workers = Array.isArray(data?.workers) ? data.workers : []
-        if (alive) setSpawnedByWorkers(workers)
+        if (alive) {
+          setSpawnedByWorkers(workers)
+          setExecSurfaceFromApi(data.execSurface ?? null)
+        }
       } catch {
         /* ignore */
       }
@@ -482,6 +660,7 @@ export default function CockpitClient({
       // "Error watching" at a glance instead of three identical
       // 8-char hashes.
       const preferredLabel =
+        w.codename ??
         w.planStepTitle ??
         w.label ??
         w.agentId.split(":").slice(1).join(":").slice(0, 8)
@@ -517,6 +696,7 @@ export default function CockpitClient({
           : "claude"
       // Same label preference as active workers.
       const preferredLabel =
+        w.codename ??
         w.planStepTitle ??
         w.label ??
         w.agentId.split(":").slice(1).join(":").slice(0, 8)
@@ -543,7 +723,61 @@ export default function CockpitClient({
     for (const w of spawnedByWorkers) m.set(w.agentId, w.reviewStatus)
     return m
   }, [spawnedByWorkers])
-  const worker = spawnedWorkers.find((a) => a.id === workerId) ?? null
+  // Sidecar map for the surface-of-origin badge (CLI vs the legacy
+  // Desktop AX path). Kept out of AgentListItem so it stays a narrow
+  // sidecar, matching the sequence/reviewStatus pattern.
+  const surfaceByAgentId = React.useMemo(() => {
+    const m = new Map<string, "claude-cli" | "codex-cli" | "desktop">()
+    for (const w of spawnedByWorkers) m.set(w.agentId, w.surface)
+    return m
+  }, [spawnedByWorkers])
+  // Sidecar map for "what tool is this worker running right now" —
+  // populated by /cockpit/spawned-by when status === "tool-running".
+  // Drives the inline "▶ Bash" tag in the rail. Map for sidecar
+  // parity with sequence/reviewStatus/surface; same eviction story.
+  const currentToolByAgentId = React.useMemo(() => {
+    const m = new Map<string, string | null>()
+    for (const w of spawnedByWorkers) {
+      m.set(w.agentId, w.currentTool ?? null)
+    }
+    return m
+  }, [spawnedByWorkers])
+  // Sidecar map for the row-background temporal activity bar. Same
+  // sidecar pattern; renders as a stacked-segment band underneath the
+  // row's text content. Null for workers we couldn't get a tail for.
+  const activityBreakdownByAgentId = React.useMemo(() => {
+    const m = new Map<string, WorkerActivityBreakdown | null>()
+    for (const w of spawnedByWorkers) {
+      m.set(w.agentId, w.activityBreakdown ?? null)
+    }
+    return m
+  }, [spawnedByWorkers])
+  // Exec's surface: the /cockpit/spawned-by endpoint returns the
+  // exec's active binding surface alongside the workers list. Null
+  // until the first poll lands or when the lane has no exec binding
+  // (rare — the exec row can outlive its binding after a cleanup race).
+  const execSurface = execSurfaceFromApi
+  const worker =
+    spawnedWorkers.find((a) => a.id === workerId) ??
+    // Marshal fallback: when David taps the Marshal row's name area,
+    // workerId becomes the Marshal's agentId — which is filtered out
+    // of spawnedWorkers. Synthesize a minimal AgentListItem so the
+    // chat pane can render the Marshal thread.
+    (workerId &&
+    cockpitMarshalAgentId &&
+    workerId === (cockpitMarshalAgentId as AgentCompositeId)
+      ? ({
+          id: workerId,
+          kind: "claude" as AgentKind,
+          label: cockpitMarshalTitle ?? "Marshal",
+          source: "claude" as const,
+          lastActivityAt: new Date().toISOString(),
+          status: "idle" as const,
+          project: null,
+          title: cockpitMarshalTitle,
+          isLive: false,
+        } satisfies AgentListItem)
+      : null)
 
   // ── Attention sounds: rest vs in-flight ──────────────────────────
   // Per David's spec, the sound must distinguish:
@@ -606,10 +840,11 @@ export default function CockpitClient({
   }, [exec, spawnedWorkers, sound])
 
   // ── Ready-for-review transition sound ─────────────────────────────
-  // Fire `thread_rest` when a worker flips INTO ready-for-review from
-  // any other state (live/idle). The first observation per worker is
-  // recorded WITHOUT firing — opening the cockpit with already-pending
-  // reviews shouldn't burst sound.
+  // Fire `david_review_ready` (three rising pings — distinct from the
+  // softer `thread_rest` two-tone) when a worker flips INTO
+  // ready-for-review from any other state. The first observation per
+  // worker is recorded WITHOUT firing — opening the cockpit with
+  // already-pending reviews shouldn't burst sound.
   const seenReviewStatus = React.useRef<Map<string, ReviewStatus>>(new Map())
   React.useEffect(() => {
     for (const w of spawnedByWorkers) {
@@ -632,7 +867,10 @@ export default function CockpitClient({
         prev === "awaiting-berthier-check" ||
         prev === "berthier-reviewed"
       if (wantsEyes && !previouslyWantedEyes) {
-        sound.fire("thread_rest", `wants-eyes:${w.reviewStatus}:${w.agentId}:${w.lastActivityAt ?? w.spawnedAt}`)
+        sound.fire(
+          "david_review_ready",
+          `review-ready:${w.reviewStatus}:${w.agentId}:${w.lastActivityAt ?? w.spawnedAt}`
+        )
       }
       seenReviewStatus.current.set(w.agentId, w.reviewStatus)
     }
@@ -782,6 +1020,12 @@ export default function CockpitClient({
           paddingBottom: "env(safe-area-inset-bottom)",
         }}
       >
+        <div className="sticky top-0 z-30 shrink-0 flex items-center gap-2 px-3 h-11 border-b border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900">
+          <CockpitNavMenu />
+          <span className="text-[11px] uppercase tracking-wider text-stone-500">
+            Cockpit
+          </span>
+        </div>
         <LaneEntryView
           workspaceId={workspaceId}
           lanes={lanes}
@@ -804,7 +1048,11 @@ export default function CockpitClient({
     >
       <TopRail
         exec={exec}
+        execSurface={execSurface}
         laneName={activeLane?.name ?? null}
+        lanes={lanes}
+        activeLaneId={activeLaneId}
+        onSelectLane={selectLane}
         workerActive={!!worker}
         execCollapsed={execCollapsed}
         onBackToLanes={backToLanes}
@@ -818,7 +1066,6 @@ export default function CockpitClient({
         onArm={arm}
         onDisarm={disarm}
         onExtend={extend}
-        onSetExec={pickExec}
       />
 
       <div className="flex-1 min-h-0 flex flex-col">
@@ -958,6 +1205,8 @@ export default function CockpitClient({
                   completedWorkers={completedSpawnedWorkers}
                   workerSequenceByAgentId={workerSequenceByAgentId}
                   reviewStatusByAgentId={reviewStatusByAgentId}
+                  currentToolByAgentId={currentToolByAgentId}
+                  activityBreakdownByAgentId={activityBreakdownByAgentId}
                   onPickWorker={(id) => setWorkerId(id)}
                   onTapBerthierReviewedPill={(id) => setAckModalAgentId(id)}
                   laneId={activeLane?.id ?? null}
@@ -983,6 +1232,53 @@ export default function CockpitClient({
         />
       )}
     </div>
+  )
+}
+
+/**
+ * Visual marker for "which substrate does this thread live on."
+ * - CLI (emerald) is the canonical surface as of 2026-05-12.
+ * - DESKTOP (amber) flags a legacy Claude/Codex Desktop AX-spawned
+ *   binding. Operationally this still works (chat-send is CLI-resume
+ *   regardless), but the badge tells David at a glance which threads
+ *   were born in the retired world so he can rebind / re-cut if
+ *   needed. After every binding migrates, DESKTOP should disappear
+ *   from active rows entirely.
+ *
+ * Doctrine: project_dual_track_desktop_and_cli.md (CLI-only post
+ * 2026-05-12). The badge is the user-facing affordance for the
+ * non-regression invariant ("identify, assume, participate in legacy
+ * Desktop threads") — David asked for this to be very distinct.
+ */
+function SurfaceBadge({
+  surface,
+  size = "sm",
+}: {
+  surface: "claude-cli" | "codex-cli" | "desktop"
+  size?: "xs" | "sm"
+}) {
+  const isCli = surface === "claude-cli" || surface === "codex-cli"
+  const label = isCli ? (surface === "codex-cli" ? "CDX·CLI" : "CLI") : "DESKTOP"
+  const title = isCli
+    ? surface === "codex-cli"
+      ? "Codex CLI session — subscription/key-bound, no Desktop dependency"
+      : "Claude CLI session — subscription-bound, no Desktop dependency"
+    : "Legacy Claude/Codex Desktop AX-spawned session. Chat-send still works (CLI-resume on the JSONL), but new spawns should not produce this surface."
+  const sizing =
+    size === "xs"
+      ? "px-1 py-[1px] text-[8.5px]"
+      : "px-1.5 py-[1px] text-[9.5px]"
+  const tint = isCli
+    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200 border-emerald-300/60 dark:border-emerald-700/60"
+    : "bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200 border-amber-300/60 dark:border-amber-700/60"
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 rounded border ${sizing} ${tint} font-semibold uppercase tracking-wider leading-none`}
+      title={title}
+      aria-label={`Surface: ${label}`}
+    >
+      {label}
+    </span>
   )
 }
 
@@ -1081,9 +1377,108 @@ function noop() {
   /* placeholder */
 }
 
+/**
+ * Mobile escape hatch from the cockpit. The cockpit container is
+ * `fixed inset-0 z-50` — it covers the whole viewport including the
+ * shell's sticky header (which is where SidebarTrigger lives). On
+ * desktop David can route via the sidebar; on mobile (David's
+ * primary cockpit surface as of 2026-05-12, ngrok'd to his iPhone
+ * homepage), the cockpit was a trap door — no nav, no theme toggle,
+ * no way out without leaving the URL entirely.
+ *
+ * This menu sits in the TopRail's left edge and gives David a small
+ * jump-back-to-rest-of-app affordance plus a dark/light mode toggle.
+ * Links are plain anchors so the destination route mounts the full
+ * shell layout (sidebar + header) on arrival.
+ */
+function CockpitNavMenu() {
+  const { setTheme, resolvedTheme } = useTheme()
+  const [open, setOpen] = React.useState(false)
+  const toggleTheme = React.useCallback(() => {
+    setTheme(resolvedTheme === "dark" ? "light" : "dark")
+  }, [setTheme, resolvedTheme])
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex items-center justify-center h-8 w-8 -ml-1 rounded text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800"
+          aria-label="Open navigation menu"
+          title="Open navigation menu"
+        >
+          <Menu className="h-4 w-4" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={8}
+        className="z-[60] w-56 p-2"
+      >
+        <div className="flex flex-col gap-0.5">
+          <a
+            href="/operator-studio"
+            className="flex items-center gap-2 px-2 py-2 min-h-[40px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setOpen(false)}
+          >
+            <Home className="h-4 w-4" /> Home
+          </a>
+          <a
+            href="/operator-studio/plan"
+            className="flex items-center gap-2 px-2 py-2 min-h-[40px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setOpen(false)}
+          >
+            Plan
+          </a>
+          <a
+            href="/operator-studio/plan?tab=work"
+            className="flex items-center gap-2 px-2 py-2 min-h-[40px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setOpen(false)}
+          >
+            Work
+          </a>
+          <a
+            href="/operator-studio/operations"
+            className="flex items-center gap-2 px-2 py-2 min-h-[40px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setOpen(false)}
+          >
+            Operations
+          </a>
+          <a
+            href="/operator-studio/knowledge"
+            className="flex items-center gap-2 px-2 py-2 min-h-[40px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setOpen(false)}
+          >
+            Knowledge
+          </a>
+          <div className="my-1 h-px bg-stone-200 dark:bg-stone-800" />
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="flex items-center gap-2 px-2 py-2 min-h-[40px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground text-left"
+          >
+            {resolvedTheme === "dark" ? (
+              <>
+                <Sun className="h-4 w-4" /> Light mode
+              </>
+            ) : (
+              <>
+                <Moon className="h-4 w-4" /> Dark mode
+              </>
+            )}
+          </button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 function TopRail({
   exec,
+  execSurface,
   laneName,
+  lanes,
+  activeLaneId,
+  onSelectLane,
   workerActive,
   execCollapsed,
   onBackToLanes,
@@ -1094,10 +1489,13 @@ function TopRail({
   onArm,
   onDisarm,
   onExtend,
-  onSetExec,
 }: {
   exec: AgentListItem | null
+  execSurface: "claude-cli" | "codex-cli" | "desktop" | null
   laneName: string | null
+  lanes: ReadonlyArray<EnrichedWorkLanePickerLane>
+  activeLaneId: string | null
+  onSelectLane: (laneId: string) => void
   workerActive: boolean
   execCollapsed: boolean
   onBackToLanes: () => void
@@ -1108,80 +1506,47 @@ function TopRail({
   onArm: (pin: string, durationMs?: number) => Promise<void>
   onDisarm: () => Promise<void> | void
   onExtend: (extraMs: number) => Promise<void>
-  onSetExec: (id: AgentCompositeId) => void | Promise<void>
 }) {
+  // Rail layout (mobile-first, 375px target):
+  //   [NavMenu] [LaneSwitcher · flex-1 min-w-0] [Surface] [Overflow] [Sound·ARMED]
+  //
+  // The lane switcher is the primary action and takes the flex-1
+  // remaining width — its text label is the only shrinking child, and
+  // it truncates via `truncate` + `min-w-0` discipline on BOTH the
+  // button and the inner label. Every other rail child is `shrink-0`,
+  // so the ARMED button on the far right is always reachable.
+  // Secondary back-buttons (Lanes / Cockpit / Collapse exec / Unpin)
+  // live in the overflow popover, each with a 44px tap target.
+  //
+  // `sticky top-0 z-30` is load-bearing — it puts the rail (and the
+  // HotModeSwitch popover descendant) into a higher stacking layer
+  // than the relative `Pane` sibling below. Don't remove again.
   return (
-    // Mirror the Bento focused-mobile rail exactly: `sticky top-0 z-30`.
-    // The z-30 is load-bearing — it puts the rail (and its
-    // HotModeSwitch popover descendant) into a higher stacking layer
-    // than the relative `Pane` sibling below. Without it the Pane
-    // paints over the popover via DOM order. Don't remove again.
-    <div className="sticky top-0 z-30 shrink-0 flex items-center gap-2 px-3 h-11 border-b border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900">
-      <button
-        type="button"
-        onClick={onBackToLanes}
-        className="inline-flex items-center gap-1 h-7 px-2 -ml-1 rounded text-[11px] font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800"
-        title="Back to lanes"
-        aria-label="Back to lanes"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" /> Lanes
-      </button>
-      {laneName && (
-        <span
-          className="text-[11px] uppercase tracking-wider text-stone-500 truncate max-w-[40vw]"
-          title={laneName}
-        >
-          {laneName}
+    <div className="sticky top-0 z-30 shrink-0 flex items-center gap-1.5 px-2 h-11 border-b border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900">
+      <span className="shrink-0">
+        <CockpitNavMenu />
+      </span>
+      <LaneSwitcherDropdown
+        lanes={lanes}
+        activeLaneId={activeLaneId}
+        activeLaneName={laneName}
+        onSelectLane={onSelectLane}
+      />
+      {execSurface && (
+        <span className="shrink-0">
+          <SurfaceBadge surface={execSurface} />
         </span>
       )}
-      {workerActive ? (
-        <>
-          <button
-            type="button"
-            onClick={onBackToMain}
-            className="inline-flex items-center gap-1 h-8 px-2 -ml-1 rounded text-[12px] font-semibold text-stone-800 dark:text-stone-100 bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700"
-            aria-label="Back to main cockpit view"
-            title="Back to main view (exec + workers list)"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            <Home className="h-3.5 w-3.5" />
-            Cockpit
-          </button>
-          {exec && (
-            <button
-              type="button"
-              onClick={onToggleExecCollapsed}
-              className="inline-flex items-center gap-1 h-7 px-2 rounded text-[11px] text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800"
-              title={
-                execCollapsed
-                  ? "Show executive thread above the worker"
-                  : "Collapse executive — give the worker the full screen"
-              }
-            >
-              {execCollapsed ? (
-                <ChevronDown className="h-3 w-3" />
-              ) : (
-                <ChevronUp className="h-3 w-3" />
-              )}
-              {execCollapsed ? "Show exec" : "Collapse exec"}
-            </button>
-          )}
-        </>
-      ) : (
-        <LaneDropdown onSetExec={onSetExec} />
-      )}
-      {exec && !workerActive && (
-        <button
-          type="button"
-          onClick={onUnpinExec}
-          className="ml-1 inline-flex items-center justify-center h-7 w-7 rounded text-stone-400 hover:text-stone-700 hover:bg-stone-100 dark:hover:text-stone-200 dark:hover:bg-stone-800"
-          title="Unpin executive — back to picker"
-          aria-label="Unpin executive"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      )}
-      <span className="ml-auto flex items-center gap-1.5">
+      <RailOverflowMenu
+        onBackToLanes={onBackToLanes}
+        workerActive={workerActive}
+        hasExec={!!exec}
+        execCollapsed={execCollapsed}
+        onBackToMain={onBackToMain}
+        onToggleExecCollapsed={onToggleExecCollapsed}
+        onUnpinExec={onUnpinExec}
+      />
+      <span className="shrink-0 flex items-center gap-1.5">
         <SoundToggle />
         <HotModeSwitch
           status={hotMode}
@@ -1191,6 +1556,259 @@ function TopRail({
         />
       </span>
     </div>
+  )
+}
+
+/**
+ * Quick-lane-jump dropdown. Lives where the static lane name used to
+ * sit; tap to switch lanes inline without back-buttoning to the
+ * picker. Primary upper-rail action (most-tapped), so it gets the
+ * flex-1 remaining width.
+ *
+ * Flex discipline: the trigger button is `flex-1 min-w-0`, the inner
+ * label is `flex-1 min-w-0 truncate`, the chevron is `shrink-0`.
+ * Without `min-w-0` on both flex levels the truncate would not engage
+ * inside the rail's flex parent — intrinsic content size would win
+ * over `text-overflow: ellipsis` and push the ARMED button off-screen.
+ */
+function LaneSwitcherDropdown({
+  lanes,
+  activeLaneId,
+  activeLaneName,
+  onSelectLane,
+}: {
+  lanes: ReadonlyArray<EnrichedWorkLanePickerLane>
+  activeLaneId: string | null
+  activeLaneName: string | null
+  onSelectLane: (laneId: string) => void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const activeLane = React.useMemo(
+    () => lanes.find((l) => l.id === activeLaneId) ?? null,
+    [lanes, activeLaneId]
+  )
+  const activeLaneLive = activeLane?.exec?.isLive === true
+  const activeLanes = React.useMemo(
+    () =>
+      lanes
+        .filter((l) => l.archivedAt === null)
+        .slice()
+        .sort((a, b) => {
+          // Active lane pinned to top, then by liveWorkerCount desc,
+          // then by createdAt desc — most-fertile lanes first.
+          if (a.id === activeLaneId) return -1
+          if (b.id === activeLaneId) return 1
+          if (a.liveWorkerCount !== b.liveWorkerCount) {
+            return b.liveWorkerCount - a.liveWorkerCount
+          }
+          return b.createdAt.localeCompare(a.createdAt)
+        }),
+    [lanes, activeLaneId]
+  )
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-label={
+            activeLaneName
+              ? `Switch lane — current: ${activeLaneName}${activeLaneLive ? " (live)" : " (idle)"}`
+              : "Switch lane"
+          }
+          title={activeLaneName ?? "Switch lane"}
+          className="flex-1 min-w-0 inline-flex items-center gap-1.5 h-9 px-2 rounded text-[12.5px] font-semibold text-stone-800 dark:text-stone-100 hover:bg-stone-100 dark:hover:bg-stone-800"
+        >
+          {activeLaneName ? (
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full shrink-0 ${
+                activeLaneLive
+                  ? "bg-emerald-500"
+                  : "bg-stone-300 dark:bg-stone-700"
+              }`}
+              aria-hidden
+            />
+          ) : null}
+          <span className="flex-1 min-w-0 truncate text-left">
+            {activeLaneName ?? "Select lane"}
+          </span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-stone-400" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        sideOffset={6}
+        className="z-[60] w-80 max-w-[calc(100vw-1rem)] max-h-[70vh] overflow-y-auto p-1"
+      >
+        <div className="px-2 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-stone-500">
+          Switch lane
+        </div>
+        {activeLanes.length === 0 ? (
+          <div className="px-2 py-2 text-[11.5px] text-stone-500">
+            No active lanes.
+          </div>
+        ) : (
+          <ul className="flex flex-col gap-0.5">
+            {activeLanes.map((l) => {
+              const isActive = l.id === activeLaneId
+              return (
+                <li key={l.id}>
+                  <button
+                    type="button"
+                    aria-current={isActive ? "true" : undefined}
+                    onClick={() => {
+                      onSelectLane(l.id)
+                      setOpen(false)
+                    }}
+                    className={`w-full text-left px-2 py-2 min-h-[44px] rounded text-[12.5px] inline-flex items-start gap-2 ${
+                      isActive
+                        ? "bg-emerald-50 dark:bg-emerald-950/40 font-semibold border-l-2 border-emerald-500 dark:border-emerald-400"
+                        : "hover:bg-stone-50 dark:hover:bg-stone-800/70"
+                    }`}
+                  >
+                    <span
+                      className={`mt-[5px] inline-block h-1.5 w-1.5 rounded-full shrink-0 ${
+                        l.exec?.isLive
+                          ? "bg-emerald-500"
+                          : "bg-stone-300 dark:bg-stone-700"
+                      }`}
+                      aria-hidden
+                    />
+                    <span className="flex-1 min-w-0">
+                      <span className="block truncate">{l.name}</span>
+                      <span className="mt-0.5 block text-[10.5px] font-normal text-stone-500 dark:text-stone-400">
+                        {l.liveWorkerCount > 0
+                          ? `${l.liveWorkerCount} live`
+                          : "idle"}
+                        {l.readyForReviewCount > 0
+                          ? ` · ${l.readyForReviewCount} ready`
+                          : ""}
+                      </span>
+                    </span>
+                    {isActive ? (
+                      <Check
+                        className="mt-[3px] h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
+                        aria-hidden
+                      />
+                    ) : null}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+/**
+ * Overflow menu for secondary upper-rail actions. Keeps all the
+ * previously-inline buttons (Back to lanes, Back to cockpit view,
+ * Collapse/Show exec, Unpin exec) reachable but collapsed behind a
+ * single icon trigger so the rail stays mobile-readable. Each menu
+ * item gets a real 44px tap target.
+ */
+function RailOverflowMenu({
+  onBackToLanes,
+  workerActive,
+  hasExec,
+  execCollapsed,
+  onBackToMain,
+  onToggleExecCollapsed,
+  onUnpinExec,
+}: {
+  onBackToLanes: () => void
+  workerActive: boolean
+  hasExec: boolean
+  execCollapsed: boolean
+  onBackToMain: () => void
+  onToggleExecCollapsed: () => void
+  onUnpinExec: () => void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const close = () => setOpen(false)
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="More cockpit actions"
+          title="More actions"
+          className="shrink-0 inline-flex items-center justify-center h-9 w-9 rounded text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800"
+        >
+          <MoreHorizontal className="h-4 w-4" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        sideOffset={6}
+        className="z-[60] w-60 p-1"
+      >
+        <div className="flex flex-col gap-0.5">
+          {workerActive ? (
+            <button
+              type="button"
+              onClick={() => {
+                onBackToMain()
+                close()
+              }}
+              className="flex items-center gap-2 px-2 py-2 min-h-[44px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground text-left"
+            >
+              <Home className="h-4 w-4 shrink-0" /> Back to cockpit view
+            </button>
+          ) : null}
+          {workerActive && hasExec ? (
+            <button
+              type="button"
+              onClick={() => {
+                onToggleExecCollapsed()
+                close()
+              }}
+              className="flex items-center gap-2 px-2 py-2 min-h-[44px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground text-left"
+              title={
+                execCollapsed
+                  ? "Show executive thread above the worker"
+                  : "Collapse executive — give the worker the full screen"
+              }
+            >
+              {execCollapsed ? (
+                <ChevronDown className="h-4 w-4 shrink-0" />
+              ) : (
+                <ChevronUp className="h-4 w-4 shrink-0" />
+              )}
+              {execCollapsed ? "Show exec" : "Collapse exec"}
+            </button>
+          ) : null}
+          {hasExec && !workerActive ? (
+            <button
+              type="button"
+              onClick={() => {
+                onUnpinExec()
+                close()
+              }}
+              className="flex items-center gap-2 px-2 py-2 min-h-[44px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground text-left"
+              title="Unpin executive — back to picker"
+            >
+              <X className="h-4 w-4 shrink-0" /> Unpin exec
+            </button>
+          ) : null}
+          <div className="my-1 h-px bg-stone-200 dark:bg-stone-800" />
+          <button
+            type="button"
+            onClick={() => {
+              onBackToLanes()
+              close()
+            }}
+            className="flex items-center gap-2 px-2 py-2 min-h-[44px] rounded text-[13px] hover:bg-accent hover:text-accent-foreground text-left"
+            title="Back to all lanes"
+          >
+            <ArrowLeft className="h-4 w-4 shrink-0" /> All lanes
+          </button>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -1417,6 +2035,8 @@ function WorkersList({
   completedWorkers,
   workerSequenceByAgentId,
   reviewStatusByAgentId,
+  currentToolByAgentId,
+  activityBreakdownByAgentId,
   onPick,
   onTapBerthierReviewedPill,
   laneId,
@@ -1432,6 +2052,13 @@ function WorkersList({
   completedWorkers?: AgentListItem[]
   workerSequenceByAgentId: Map<string, number>
   reviewStatusByAgentId?: Map<string, ReviewStatus>
+  /** Sidecar: agent id → tool name currently in flight (e.g. "Bash").
+   *  When present and the worker isn't in a tier-override state, the
+   *  row shows an inline "▶ Bash" pulse pill. */
+  currentToolByAgentId?: Map<string, string | null>
+  /** Sidecar: agent id → time-bucket breakdown since spawn. Drives the
+   *  stacked-segment background bar under each row. */
+  activityBreakdownByAgentId?: Map<string, WorkerActivityBreakdown | null>
   onPick: (id: AgentCompositeId) => void
   onTapBerthierReviewedPill?: (id: AgentCompositeId) => void
   /** When set, the "+ new worker" affordance is rendered. Tap opens an
@@ -1501,6 +2128,72 @@ function WorkersList({
   )
   const [spawnBusy, setSpawnBusy] = React.useState(false)
   const [spawnError, setSpawnError] = React.useState<string | null>(null)
+  // Image attach state — paste/drag/pick all converge on one
+  // `spawnImageDataUrl`, mirroring BentoPane's composer. The route
+  // stashes the dataUrl to disk and prepends `[image: <abs>]` to the
+  // prompt the worker sees on its first turn.
+  const [spawnImageDataUrl, setSpawnImageDataUrl] = React.useState<
+    string | null
+  >(null)
+  const [spawnImageError, setSpawnImageError] = React.useState<string | null>(
+    null
+  )
+  const [spawnDragOver, setSpawnDragOver] = React.useState(false)
+  const spawnFileInputRef = React.useRef<HTMLInputElement | null>(null)
+
+  const SPAWN_IMAGE_BINARY_CAP = 6 * 1024 * 1024
+  const ingestSpawnImageFile = React.useCallback((file: File) => {
+    if (!/^image\/(png|jpe?g)$/.test(file.type)) {
+      setSpawnImageError("Only PNG or JPEG images are supported.")
+      return
+    }
+    if (file.size > SPAWN_IMAGE_BINARY_CAP) {
+      setSpawnImageError(
+        `Image too large (${(file.size / 1024 / 1024).toFixed(1)} MB; cap 6 MB).`
+      )
+      return
+    }
+    const reader = new FileReader()
+    reader.onerror = () => setSpawnImageError("Failed to read image.")
+    reader.onload = () => {
+      const r = reader.result
+      if (typeof r === "string") {
+        setSpawnImageDataUrl(r)
+        setSpawnImageError(null)
+      } else {
+        setSpawnImageError("Unexpected reader result.")
+      }
+    }
+    reader.readAsDataURL(file)
+  }, [])
+
+  const handleSpawnPaste = React.useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items
+      if (!items) return
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile()
+          if (file) {
+            e.preventDefault()
+            ingestSpawnImageFile(file)
+            return
+          }
+        }
+      }
+    },
+    [ingestSpawnImageFile]
+  )
+
+  const handleSpawnDrop = React.useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      setSpawnDragOver(false)
+      const file = e.dataTransfer?.files?.[0]
+      if (file) ingestSpawnImageFile(file)
+    },
+    [ingestSpawnImageFile]
+  )
 
   const submitSpawn = React.useCallback(async () => {
     if (!laneId) return
@@ -1523,6 +2216,7 @@ function WorkersList({
             ...(spawnAppKind === "claude"
               ? { model: "claude-opus-4-7" }
               : {}),
+            ...(spawnImageDataUrl ? { image: spawnImageDataUrl } : {}),
           }),
         }
       )
@@ -1532,13 +2226,15 @@ function WorkersList({
       }
       setSpawnOpen(false)
       setSpawnPrompt("")
+      setSpawnImageDataUrl(null)
+      setSpawnImageError(null)
       onSpawned?.()
     } catch (e) {
       setSpawnError(e instanceof Error ? e.message : "spawn failed")
     } finally {
       setSpawnBusy(false)
     }
-  }, [laneId, spawnPrompt, spawnAppKind, onSpawned])
+  }, [laneId, spawnPrompt, spawnAppKind, spawnImageDataUrl, onSpawned])
 
   // Feature 1 — Drag-to-resize rail height. The header doubles as the
   // drag handle (sort buttons and "+" stop propagation so taps still
@@ -1684,16 +2380,72 @@ function WorkersList({
       </div>
       {spawnOpen && laneId && (
         <div
-          className="px-3 py-2 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-950 flex flex-col gap-2"
+          className={`px-3 py-2 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-950 flex flex-col gap-2 transition-colors ${
+            spawnDragOver
+              ? "ring-2 ring-stone-400 bg-stone-100/80 dark:bg-stone-800/40"
+              : ""
+          }`}
           data-testid="cockpit-spawn-worker-form"
+          onDragOver={(e) => {
+            if (e.dataTransfer?.types?.includes("Files")) {
+              e.preventDefault()
+              setSpawnDragOver(true)
+            }
+          }}
+          onDragLeave={() => setSpawnDragOver(false)}
+          onDrop={handleSpawnDrop}
         >
+          {spawnImageDataUrl && (
+            <div className="flex items-center gap-2 rounded border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-900 px-2 py-1">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={spawnImageDataUrl}
+                alt="Attachment preview"
+                className="h-10 w-10 rounded object-cover"
+              />
+              <div className="flex-1 min-w-0">
+                <p className="truncate text-[11px] text-stone-700 dark:text-stone-200">
+                  Image attached
+                </p>
+                <p className="text-[10px] text-stone-500">
+                  {(spawnImageDataUrl.length * 0.75 / 1024).toFixed(0)} KB · will
+                  be stashed to ~/Downloads and prepended to the prompt
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSpawnImageDataUrl(null)
+                  setSpawnImageError(null)
+                }}
+                disabled={spawnBusy}
+                className="text-[10px] uppercase tracking-wider text-stone-500 hover:text-stone-700 dark:hover:text-stone-200"
+                aria-label="Remove attachment"
+              >
+                Clear
+              </button>
+            </div>
+          )}
           <textarea
             value={spawnPrompt}
             onChange={(e) => setSpawnPrompt(e.target.value)}
-            placeholder="Prompt for the new worker…"
+            onPaste={handleSpawnPaste}
+            placeholder="Prompt for the new worker… (paste or drop an image to attach)"
             rows={3}
             className="w-full text-[12px] rounded border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-900 px-2 py-1 resize-y"
             disabled={spawnBusy}
+          />
+          <input
+            ref={spawnFileInputRef}
+            type="file"
+            accept="image/png,image/jpeg"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) ingestSpawnImageFile(f)
+              // reset so re-picking the same file fires onChange again
+              e.target.value = ""
+            }}
           />
           <div className="flex items-center gap-2">
             <label className="text-[10px] uppercase tracking-wider text-stone-500">
@@ -1714,6 +2466,16 @@ function WorkersList({
             </label>
             <button
               type="button"
+              onClick={() => spawnFileInputRef.current?.click()}
+              disabled={spawnBusy}
+              className="rounded border border-stone-300 dark:border-stone-700 text-[11px] px-2 py-1 text-stone-600 dark:text-stone-300 disabled:opacity-50"
+              title="Attach an image — also accepts paste or drag-and-drop"
+              data-testid="cockpit-spawn-worker-attach-image"
+            >
+              + Image
+            </button>
+            <button
+              type="button"
               onClick={submitSpawn}
               disabled={spawnBusy || spawnPrompt.trim().length === 0}
               className="ml-auto rounded bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900 text-[11px] px-2 py-1 disabled:opacity-50"
@@ -1725,6 +2487,8 @@ function WorkersList({
               onClick={() => {
                 setSpawnOpen(false)
                 setSpawnError(null)
+                setSpawnImageDataUrl(null)
+                setSpawnImageError(null)
               }}
               disabled={spawnBusy}
               className="rounded border border-stone-300 dark:border-stone-700 text-[11px] px-2 py-1 text-stone-600 dark:text-stone-300"
@@ -1732,6 +2496,11 @@ function WorkersList({
               Cancel
             </button>
           </div>
+          {spawnImageError && (
+            <p className="text-[11px] text-amber-600 dark:text-amber-400">
+              {spawnImageError}
+            </p>
+          )}
           {spawnError && (
             <p className="text-[11px] text-red-600 dark:text-red-400">
               {spawnError}
@@ -1761,6 +2530,7 @@ function WorkersList({
             />
           </div>
         )}
+        <ActivityBarLegend />
         {sortedWorkers.length === 0 ? (
           <div
             className="px-3 py-4 text-[12px] text-stone-500 dark:text-stone-400 text-center"
@@ -1780,6 +2550,10 @@ function WorkersList({
                   agent={a}
                   workerSequence={workerSequenceByAgentId.get(a.id) ?? null}
                   reviewStatus={tier}
+                  currentTool={currentToolByAgentId?.get(a.id) ?? null}
+                  activityBreakdown={
+                    activityBreakdownByAgentId?.get(a.id) ?? null
+                  }
                   onPick={onPick}
                   onTapPill={
                     tier === "berthier-reviewed" && onTapBerthierReviewedPill
@@ -1890,6 +2664,8 @@ function RailSwitcher({
   completedWorkers,
   workerSequenceByAgentId,
   reviewStatusByAgentId,
+  currentToolByAgentId,
+  activityBreakdownByAgentId,
   onPickWorker,
   onTapBerthierReviewedPill,
   laneId,
@@ -1908,6 +2684,8 @@ function RailSwitcher({
   completedWorkers: AgentListItem[]
   workerSequenceByAgentId: Map<string, number>
   reviewStatusByAgentId?: Map<string, ReviewStatus>
+  currentToolByAgentId?: Map<string, string | null>
+  activityBreakdownByAgentId?: Map<string, WorkerActivityBreakdown | null>
   onPickWorker: (id: AgentCompositeId) => void
   onTapBerthierReviewedPill?: (id: AgentCompositeId) => void
   laneId?: string | null
@@ -2029,6 +2807,8 @@ function RailSwitcher({
               completedWorkers={completedWorkers}
               workerSequenceByAgentId={workerSequenceByAgentId}
               reviewStatusByAgentId={reviewStatusByAgentId}
+              currentToolByAgentId={currentToolByAgentId}
+              activityBreakdownByAgentId={activityBreakdownByAgentId}
               onPick={onPickWorker}
               onTapBerthierReviewedPill={onTapBerthierReviewedPill}
               laneId={laneId}
@@ -2060,13 +2840,32 @@ function RailSwitcher({
     )
   }
 
+  // Rail-tab counts + attention cue. Counts give David peripheral
+  // awareness of "what's in the other tabs" without forcing a switch.
+  // The amber pip on Workers fires when at least one worker is in
+  // `berthier-reviewed` — that's the "needs YOUR eyes" tier; the more
+  // calm `candidate-self-believed` / `awaiting-berthier-check` tiers
+  // need Berthier's eyes first, so we don't escalate those onto the
+  // tab itself (the row's amber band already shows them in-list).
+  const workerCount = workers.length
+  const openTaskCount = tasks.filter(
+    (t) => t.status === "open" || t.status === "in-motion"
+  ).length
+  const attentionCount = React.useMemo(() => {
+    if (!reviewStatusByAgentId) return 0
+    let n = 0
+    for (const v of reviewStatusByAgentId.values()) {
+      if (v === "berthier-reviewed") n++
+    }
+    return n
+  }, [reviewStatusByAgentId])
   return (
     <div className="flex flex-col" data-testid="cockpit-rail-switcher">
-      <div className="px-2 py-1 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-950 flex items-center gap-1">
+      <div className="px-2 py-1.5 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-950 flex items-center gap-1">
         <button
           type="button"
           onClick={() => setRail("workers")}
-          className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded ${
+          className={`relative text-[10px] uppercase tracking-wider px-2.5 py-1.5 rounded min-h-[28px] ${
             rail === "workers"
               ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
               : "text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
@@ -2075,11 +2874,28 @@ function RailSwitcher({
           data-testid="cockpit-rail-switch-workers"
         >
           Workers
+          {workerCount > 0 && (
+            <span
+              className={`ml-1 text-[10px] tabular-nums ${
+                rail === "workers" ? "opacity-80" : "text-stone-400"
+              }`}
+            >
+              {workerCount}
+            </span>
+          )}
+          {attentionCount > 0 && (
+            <span
+              className="absolute -top-1 -right-1 inline-flex items-center justify-center h-3.5 min-w-[14px] px-1 rounded-full bg-amber-500 text-white text-[9px] font-bold animate-pulse"
+              aria-label={`${attentionCount} worker${attentionCount === 1 ? "" : "s"} need${attentionCount === 1 ? "s" : ""} your eyes`}
+            >
+              {attentionCount}
+            </span>
+          )}
         </button>
         <button
           type="button"
           onClick={() => setRail("tasks")}
-          className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded ${
+          className={`text-[10px] uppercase tracking-wider px-2.5 py-1.5 rounded min-h-[28px] ${
             rail === "tasks"
               ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
               : "text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
@@ -2088,11 +2904,20 @@ function RailSwitcher({
           data-testid="cockpit-rail-switch-tasks"
         >
           Tasks
+          {openTaskCount > 0 && (
+            <span
+              className={`ml-1 text-[10px] tabular-nums ${
+                rail === "tasks" ? "opacity-80" : "text-stone-400"
+              }`}
+            >
+              {openTaskCount}
+            </span>
+          )}
         </button>
         <button
           type="button"
           onClick={() => setRail("artifacts")}
-          className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded ${
+          className={`text-[10px] uppercase tracking-wider px-2.5 py-1.5 rounded min-h-[28px] ${
             rail === "artifacts"
               ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
               : "text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
@@ -2109,6 +2934,8 @@ function RailSwitcher({
           completedWorkers={completedWorkers}
           workerSequenceByAgentId={workerSequenceByAgentId}
           reviewStatusByAgentId={reviewStatusByAgentId}
+          currentToolByAgentId={currentToolByAgentId}
+          activityBreakdownByAgentId={activityBreakdownByAgentId}
           onPick={onPickWorker}
           onTapBerthierReviewedPill={onTapBerthierReviewedPill}
           laneId={laneId}
@@ -2549,16 +3376,85 @@ function TaskRow({
   )
 }
 
+// Pastel tones for the temporal activity bar bands. Muted on purpose
+// — the foreground text overlays at z-10 and these sit at ~30%
+// opacity (see render below). Stable per-kind mapping so the rows
+// "read" the same color story across the rail.
+const ACTIVITY_BAND_TONES: Record<
+  "user" | "agent" | "tool" | "idle",
+  string
+> = {
+  user: "bg-sky-400 dark:bg-sky-500",
+  agent: "bg-emerald-400 dark:bg-emerald-500",
+  tool: "bg-violet-400 dark:bg-violet-500",
+  idle: "bg-stone-300 dark:bg-stone-600",
+}
+
+const ACTIVITY_BAND_LABELS: Record<
+  "user" | "agent" | "tool" | "idle",
+  string
+> = {
+  user: "User",
+  agent: "Agent",
+  tool: "Tool",
+  idle: "Idle",
+}
+
+// Thin color-key legend for the row-background activity bars. Sits at
+// the top of the workers list (above the rows) so the operator can
+// orient on what each band means without scrolling. Mobile-first —
+// kept to one short line at full saturation so the swatches actually
+// register (the row bars themselves are ~20% opacity for ambient feel).
+function ActivityBarLegend() {
+  const kinds: Array<"user" | "agent" | "tool" | "idle"> = [
+    "user",
+    "agent",
+    "tool",
+    "idle",
+  ]
+  return (
+    <div
+      className="px-3 py-1.5 flex items-center gap-3 text-[10px] text-stone-500 dark:text-stone-400 border-b border-stone-200 dark:border-stone-800 bg-stone-50/80 dark:bg-stone-950/60"
+      data-testid="cockpit-worker-activity-legend"
+      aria-label="Activity-bar color key"
+    >
+      <span className="uppercase tracking-wider text-[9px] text-stone-400 dark:text-stone-500">
+        bar key
+      </span>
+      {kinds.map((k) => (
+        <span key={k} className="inline-flex items-center gap-1">
+          <span
+            aria-hidden
+            className={`inline-block h-2.5 w-2.5 rounded-sm opacity-80 dark:opacity-70 ${ACTIVITY_BAND_TONES[k]}`}
+          />
+          {ACTIVITY_BAND_LABELS[k]}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 function AgentRow({
   agent,
   workerSequence,
   reviewStatus,
+  surface,
+  currentTool,
+  activityBreakdown,
   onPick,
   onTapPill,
 }: {
   agent: AgentListItem
   workerSequence?: number | null
   reviewStatus?: ReviewStatus | null
+  surface?: "claude-cli" | "codex-cli" | "desktop" | null
+  /** Name of the tool currently in flight (e.g. "Bash", "Read"). When
+   *  set and the worker isn't in a tier-override state, the row swaps
+   *  the relative-time chip for an inline "▶ Bash" pill. */
+  currentTool?: string | null
+  /** Aggregated time-bucket breakdown since spawn — drives the stacked
+   *  background bar (David 2026-05-12 marquee). Null suppresses the bar. */
+  activityBreakdown?: WorkerActivityBreakdown | null
   onPick: (id: AgentCompositeId) => void
   onTapPill?: (id: AgentCompositeId) => void
 }) {
@@ -2568,44 +3464,159 @@ function AgentRow({
   const isBerthierReviewed = tier === "berthier-reviewed"
   const isHumanApproved = tier === "human-approved"
   const isIdle = tier === "idle"
-  // Distinct visual treatment per multi-tier reviewStatus (0034):
-  //   awaiting-berthier-check  → yellow band + pill (needs Berthier's eyes)
-  //   berthier-reviewed        → amber band + pill (needs YOUR eyes)
-  //   human-approved           → muted green check, dim
-  //   live                     → existing pulsing dot
-  //   idle                     → muted
-  const rowBg = isAwaitingBerthier
-    ? "bg-yellow-50 dark:bg-yellow-950/40 ring-1 ring-yellow-300 dark:ring-yellow-700"
-    : isBerthierReviewed
-    ? "bg-amber-50 dark:bg-amber-950/40 ring-1 ring-amber-300 dark:ring-amber-700"
-    : isHumanApproved
-    ? "opacity-60"
-    : ""
-  const dotClass = isAwaitingBerthier
+  // Tier overrides win over the status-derived dot. `live` falls
+  // through to the status-derived dot so we can distinguish between
+  // streaming / thinking / tool-running visually instead of conflating
+  // every "live" worker into one green pulse.
+  //
+  // Liveness fix (David 2026-05-12): the dot used to key off
+  // `agent.isLive` (= mtimeAgeMs<5s). A long Bash / Read leaves mtime
+  // stale → grey dot even though the parsed `status` correctly says
+  // tool-running. The dot now keys off status, matching the bento
+  // pane's STATUS_DOT idiom (extracted to worker-status-visuals).
+  const statusVisual = WORKER_STATUS_VISUAL[agent.status]
+  const tierDotClass = isAwaitingBerthier
     ? "bg-yellow-500"
     : isBerthierReviewed
-    ? "bg-amber-500"
+    ? "bg-amber-500 animate-pulse"
     : isHumanApproved
     ? "bg-emerald-600"
     : isIdle
     ? "bg-stone-300 dark:bg-stone-600"
-    : agent.isLive
-    ? "bg-emerald-500 animate-pulse"
-    : "bg-stone-400"
+    : null
+  const dotClass =
+    tierDotClass ??
+    `${statusVisual.color}${statusVisual.pulse ? " animate-pulse" : ""}`
+  // berthier-reviewed gets a thicker left ring + a stronger pill so
+  // "needs your eyes" reads as an obvious tap target on a phone glance
+  // (David's 2026-05-12 ask: the affordance should be unmissable).
+  const rowBg = isAwaitingBerthier
+    ? "bg-yellow-50 dark:bg-yellow-950/40 ring-1 ring-yellow-300 dark:ring-yellow-700"
+    : isBerthierReviewed
+    ? "bg-amber-50 dark:bg-amber-950/40 ring-1 ring-amber-300 dark:ring-amber-700 border-l-4 border-amber-500"
+    : isHumanApproved
+    ? "opacity-60"
+    : ""
   const titleDim =
     isIdle || isHumanApproved
       ? "text-stone-500 dark:text-stone-500"
       : "text-stone-900 dark:text-stone-100"
+  // Show the live-state pill (▶ Bash / ▶ thinking / ▶ live) only when
+  // the worker is actually active and no tier override is steering the
+  // row to a "needs eyes" treatment. The pill replaces the trailing
+  // relative-time chip — recency isn't useful when the thing is
+  // moving right now.
+  const showLivePill =
+    !isAwaitingBerthier &&
+    !isBerthierReviewed &&
+    !isHumanApproved &&
+    !isIdle &&
+    isActiveStatus(agent.status)
+  const livePillLabel = currentTool ?? statusVisual.label
+  const livePillTone =
+    agent.status === "tool-running"
+      ? "bg-sky-100 text-sky-800 dark:bg-sky-900/50 dark:text-sky-200"
+      : agent.status === "thinking"
+      ? "bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200"
+      : "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200"
+  // Label discipline (David 2026-05-12): "respect the human attention
+  // context". The planStepTitle V4 writes when spawning is verbose by
+  // design ("cockpit perf hawk — send-button latency + optimistic fire").
+  // For the rail, we surface only the handle ("cockpit perf hawk") as
+  // the primary line and hang the rest as a quieter secondary line.
+  // The user can rename the handle inline; that override sits in
+  // localStorage keyed by agentId. Drop the agent.title fallback — that
+  // path used to surface the JSONL kickoff prompt ("You are the X
+  // worker spawned by V4…") which leaked into the rail when no
+  // planStepTitle was set. Worker rail only renders the curated
+  // handle now; the verbose stuff stays in the focused thread view.
+  const derived = React.useMemo(
+    () => deriveWorkerHandle(agent.label),
+    [agent.label]
+  )
+  const [customHandle, setCustomHandle] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    try {
+      const v = window.localStorage.getItem(workerHandleStorageKey(agent.id))
+      setCustomHandle(v && v.length > 0 ? v : null)
+    } catch {
+      /* ignore */
+    }
+  }, [agent.id])
+  const displayHandle = customHandle ?? derived.handle ?? agent.label
+  const detailLine =
+    customHandle && customHandle !== derived.handle
+      ? agent.label
+      : derived.detail
+  const [editing, setEditing] = React.useState(false)
+  const [draft, setDraft] = React.useState("")
+  const inputRef = React.useRef<HTMLInputElement | null>(null)
+  React.useEffect(() => {
+    if (editing) {
+      setDraft(displayHandle)
+      // Focus on next tick so the input has mounted.
+      window.setTimeout(() => {
+        inputRef.current?.focus()
+        inputRef.current?.select()
+      }, 0)
+    }
+  }, [editing, displayHandle])
+  const commitRename = React.useCallback(() => {
+    const next = draft.trim()
+    try {
+      const key = workerHandleStorageKey(agent.id)
+      if (!next || next === derived.handle) {
+        window.localStorage.removeItem(key)
+        setCustomHandle(null)
+      } else {
+        window.localStorage.setItem(key, next)
+        setCustomHandle(next)
+      }
+    } catch {
+      /* ignore */
+    }
+    setEditing(false)
+  }, [draft, agent.id, derived.handle])
+  // Stacked-segment background bar (David 2026-05-12 marquee). Sits
+  // absolutely behind the row's text content at low opacity so the
+  // colored bands narrate the worker's lifetime without overwhelming
+  // the foreground. Hidden when no breakdown is available (inactive
+  // workers, tail parse failure) and on tier-override rows where the
+  // existing band already saturates the row visually.
+  const showActivityBar =
+    !!activityBreakdown &&
+    !isAwaitingBerthier &&
+    !isBerthierReviewed &&
+    !isHumanApproved
+  const bands = showActivityBar && activityBreakdown
+    ? activityBands(activityBreakdown)
+    : null
   return (
     <li>
       <button
         type="button"
         onClick={() => onPick(agent.id)}
-        className={`w-full text-left px-3 py-2.5 active:bg-stone-100 dark:active:bg-stone-800 ${rowBg}`}
+        className={`relative w-full text-left px-3 py-3 min-h-[44px] overflow-hidden active:bg-stone-100 dark:active:bg-stone-800 ${rowBg}`}
       >
+        {bands && (
+          <div
+            aria-hidden
+            className="absolute inset-0 z-0 flex pointer-events-none opacity-20 dark:opacity-10"
+            data-testid="cockpit-worker-activity-bar"
+          >
+            {bands.map((b) => (
+              <span
+                key={b.kind}
+                className={`block h-full transition-[width] duration-[4000ms] ease-in-out ${ACTIVITY_BAND_TONES[b.kind]}`}
+                style={{ width: `${(b.ratio * 100).toFixed(2)}%` }}
+              />
+            ))}
+          </div>
+        )}
+        <div className="relative z-10">
         <div className="flex items-center gap-2">
           <span
-            className={`inline-block h-1.5 w-1.5 rounded-full ${dotClass}`}
+            className={`inline-block h-2 w-2 rounded-full ${dotClass}`}
             aria-hidden
           />
           <span
@@ -2617,6 +3628,7 @@ function AgentRow({
               ? ` · Worker ${workerSequence}`
               : ""}
           </span>
+          {surface && <SurfaceBadge surface={surface} size="xs" />}
           {isAwaitingBerthier && (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-yellow-200 dark:bg-yellow-900/60 text-[9.5px] font-semibold uppercase tracking-wider text-yellow-900 dark:text-yellow-200">
               needs Berthier&apos;s eyes
@@ -2633,28 +3645,95 @@ function AgentRow({
                     }
                   : undefined
               }
-              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/60 text-[9.5px] font-semibold uppercase tracking-wider text-amber-900 dark:text-amber-200 ${onTapPill ? "cursor-pointer hover:bg-amber-300 dark:hover:bg-amber-800" : ""}`}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-300 dark:bg-amber-800/80 text-[10px] font-bold uppercase tracking-wider text-amber-950 dark:text-amber-100 shadow-sm ${onTapPill ? "cursor-pointer hover:bg-amber-400 dark:hover:bg-amber-700" : ""}`}
             >
-              needs your eyes — Berthier looked
+              tap — needs your eyes
             </span>
           )}
           {isHumanApproved && (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-[9.5px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
-              ✓ approved
+              approved
             </span>
           )}
-          <span className="ml-auto text-[10px] text-stone-500">
-            {formatRelative(agent.lastActivityAt)}
-          </span>
+          {showLivePill ? (
+            <span
+              className={`ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9.5px] font-semibold tracking-wide ${livePillTone}`}
+              title={`Currently ${agent.status}${currentTool ? `: ${currentTool}` : ""}`}
+            >
+              <span
+                className="inline-block h-1.5 w-1.5 rounded-full bg-current animate-pulse"
+                aria-hidden
+              />
+              {livePillLabel}
+            </span>
+          ) : (
+            <span className="ml-auto text-[10px] text-stone-500">
+              {formatRelative(agent.lastActivityAt)}
+            </span>
+          )}
         </div>
-        <div className={`mt-0.5 text-[12.5px] font-medium line-clamp-2 ${titleDim}`}>
-          {agent.title ?? agent.label}
+        <div className="mt-1 flex items-center gap-1.5">
+          {editing ? (
+            <input
+              ref={inputRef}
+              type="text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault()
+                  commitRename()
+                } else if (e.key === "Escape") {
+                  e.preventDefault()
+                  setEditing(false)
+                }
+              }}
+              onBlur={commitRename}
+              maxLength={40}
+              className="flex-1 min-w-0 px-1.5 py-0.5 text-[13px] font-semibold bg-white dark:bg-stone-800 border border-stone-300 dark:border-stone-600 rounded text-stone-900 dark:text-stone-100"
+              aria-label="Rename worker"
+            />
+          ) : (
+            <span
+              className={`flex-1 min-w-0 text-[13px] font-semibold ${titleDim}`}
+              title={agent.label}
+            >
+              {displayHandle}
+            </span>
+          )}
+          {!editing && (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label="Rename worker"
+              title="Rename this worker"
+              onClick={(e) => {
+                e.stopPropagation()
+                setEditing(true)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.stopPropagation()
+                  e.preventDefault()
+                  setEditing(true)
+                }
+              }}
+              className="shrink-0 text-[10px] text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 px-1.5 py-0.5 rounded hover:bg-stone-100 dark:hover:bg-stone-800 cursor-pointer"
+            >
+              rename
+            </span>
+          )}
         </div>
-        {agent.project && (
-          <div className="mt-0.5 text-[10.5px] text-stone-500 truncate">
-            {agent.project}
+        {detailLine && (
+          <div
+            className="mt-0.5 text-[11px] text-stone-500 dark:text-stone-400"
+            title={detailLine}
+          >
+            {detailLine}
           </div>
         )}
+        </div>
       </button>
     </li>
   )
@@ -3126,6 +4205,7 @@ interface TimelineEvent {
 const TIMELINE_GLYPH: Record<string, string> = {
   pulled_in: "↘",
   created_in_lane: "✦",
+  worker_spawned: "⚙",
   started: "▶",
   marked_in_motion: "◆",
   covered: "✓",
