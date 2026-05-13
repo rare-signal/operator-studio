@@ -234,3 +234,143 @@
     transparent 6px
   );
 }
+
+/**
+ * Cockpit progressive disclosure — credits-reel transition on the
+ * collapsed ToolGroupCollapsible row each time the displayed tool /
+ * thinking line changes.
+ *
+ * Effect (David 2026-05-12): "text kind of goes up into the void and
+ * disappears right up above itself and text fades in and flies up
+ * below it." Two stacked layers in the same row — the outgoing layer
+ * translates upward as it fades to zero, the incoming layer rises
+ * from below as it fades in. Identical 240ms duration and easing so
+ * the crossfade reads as one continuous motion, not two beats.
+ *
+ * The row container is `position: relative` with a fixed min-height so
+ * the document layout never jumps during the swap; both layers are
+ * `position: absolute; inset: 0`. After the animation lands the
+ * outgoing layer is removed from the tree.
+ */
+@keyframes cockpit-fade-up-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes cockpit-fade-up-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+.cockpit-fade-up-in {
+  animation: cockpit-fade-up-in 240ms ease-out both;
+}
+.cockpit-fade-up-out {
+  animation: cockpit-fade-up-out 240ms ease-out both;
+  pointer-events: none;
+}
+/* Reduced-motion: skip the translate, keep a brief opacity crossfade
+ * so the row swap is still legible without inducing vestibular noise. */
+@media (prefers-reduced-motion: reduce) {
+  .cockpit-fade-up-in {
+    animation: none;
+  }
+  .cockpit-fade-up-out {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+/**
+ * Cockpit progressive disclosure — in-flight loader (three-dot wave).
+ *
+ * Three small dots that pulse in sequence next to the current tool's
+ * glyph while a tool_use is still awaiting its tool_result. Staggered
+ * by 160ms so the wave reads as motion, not three blinkers. Stone
+ * palette accent — never color-shifts.
+ */
+@keyframes cockpit-dot-wave {
+  0%, 60%, 100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-1.5px);
+  }
+}
+.cockpit-dot-wave > span {
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  border-radius: 9999px;
+  background-color: currentColor;
+  animation: cockpit-dot-wave 1.1s ease-in-out infinite;
+}
+.cockpit-dot-wave > span:nth-child(2) {
+  animation-delay: 160ms;
+}
+.cockpit-dot-wave > span:nth-child(3) {
+  animation-delay: 320ms;
+}
+
+/**
+ * Chat-pane pulsation indicator — "is the AI working, or is it waiting
+ * on me?"
+ *
+ * Two states sit on the BentoPane container as an inset glow that never
+ * touches layout:
+ *   - working (blue): calm "things are happening, no urgency" pulse
+ *   - idle   (red):  soft "your executive is lying fallow" pulse
+ *
+ * Both share the same ~3s ease-in-out cycle so the cadence reads as one
+ * indicator switching colors rather than two competing animations. The
+ * red state is suppressed for 5s after any mouse/key activity by the
+ * component (no CSS hook needed — the className simply toggles off).
+ *
+ * Implementation: a child pseudo-layer with `position: absolute; inset: 0`
+ * gets the inset box-shadow + opacity animation. The parent (the
+ * BentoPane `<article>`) just needs `position: relative` and the layer
+ * does the rest, so the existing border/ring/shadow are untouched.
+ */
+@keyframes chat-pulse-glow {
+  0%, 100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+.chat-pulse-working {
+  animation: chat-pulse-glow 3s ease-in-out infinite;
+  box-shadow: inset 0 0 28px 4px rgb(56 189 248 / 0.45); /* sky-400 */
+}
+:is(.dark) .chat-pulse-working {
+  box-shadow: inset 0 0 28px 4px rgb(125 211 252 / 0.40); /* sky-300 */
+}
+.chat-pulse-idle {
+  animation: chat-pulse-glow 3s ease-in-out infinite;
+  box-shadow: inset 0 0 28px 4px rgb(248 113 113 / 0.40); /* red-400 */
+}
+:is(.dark) .chat-pulse-idle {
+  box-shadow: inset 0 0 28px 4px rgb(252 165 165 / 0.35); /* red-300 */
+}
+/* Reduced-motion: keep the colored inset ring — color still conveys
+ * state — but drop the pulse so we don't induce vestibular noise. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-pulse-working,
+  .chat-pulse-idle {
+    animation: none;
+    opacity: 0.6;
+  }
+}
