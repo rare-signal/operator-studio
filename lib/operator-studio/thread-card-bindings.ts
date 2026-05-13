@@ -107,6 +107,12 @@ export interface UpsertThreadCardBindingInput {
    *  path, kept only as a column default for back-compat with pre-CLI
    *  rows. New spawn paths MUST set this explicitly. */
   surface?: "claude-cli" | "codex-cli" | "desktop"
+  /** Tier marker. 'worker' (default) | 'exec' | 'marshal'. The
+   *  role-conflict guard in `setLaneExec` rejects any agentId whose
+   *  active binding row has role='worker' — spawn-an-exec paths MUST
+   *  set role='exec' before (or instead of) calling setLaneExec, else
+   *  the lane promotion will throw LaneExecConflictError. */
+  role?: "worker" | "exec" | "marshal"
 }
 
 function rowToBinding(row: typeof operatorThreadCardBindings.$inferSelect): ThreadCardBinding {
@@ -252,6 +258,7 @@ export async function upsertThreadCardBinding(
           spawnOrigin: input.spawnOrigin ?? row.spawnOrigin ?? null,
           planId: input.planId ?? row.planId ?? null,
           surface: input.surface ?? row.surface ?? "claude-cli",
+          role: input.role ?? row.role ?? "worker",
           updatedAt: now,
         })
         .where(eq(operatorThreadCardBindings.id, row.id))
@@ -282,6 +289,7 @@ export async function upsertThreadCardBinding(
       spawnedByAgentId: input.spawnedByAgentId ?? null,
       spawnOrigin: input.spawnOrigin ?? null,
       surface: input.surface ?? "claude-cli",
+      role: input.role ?? "worker",
       createdBy: input.createdBy ?? null,
       createdAt: now,
       updatedAt: now,

@@ -130,37 +130,44 @@ export async function POST(
       )
     }
 
-    // Persist the exec binding with the CLI surface tag so the
-    // chat-send route dispatches via `claude --resume`, not AX paste.
-    try {
-      const workspaceId = await getActiveWorkspaceId()
-      const initialPlanStepId =
-        body?.initialPlanStepId && body.initialPlanStepId.trim().length > 0
-          ? body.initialPlanStepId
-          : lane.id
-      await upsertThreadCardBinding({
-        workspaceId,
-        agentId: result.agentId,
-        agentKind,
-        planStepId: initialPlanStepId,
-        source: "launch",
-        spawnOrigin: "cockpit",
-        surface,
-        createdBy: auth.identity ?? null,
-        rationale: "lane exec create-new (CLI surface)",
-      })
-    } catch (e) {
-      console.warn(
-        "[exec] exec-binding upsert failed (non-fatal):",
-        e instanceof Error ? e.message : e
-      )
-    }
-
+    // ORDER MATTERS: setLaneExec's role-conflict guard treats ANY
+    // active binding as worker. Promote the lane row first (thread is
+    // "available" until any binding exists), THEN write the binding
+    // for surface tagging.
     try {
       const updated = await setLaneExec(id, {
         agentId: result.agentId,
         agentKind,
       })
+
+      // Best-effort binding write for surface dispatch. Failures here
+      // don't undo the exec promotion — the lane row already has
+      // execAgentId set, and the chat-send route's CLI-resume path
+      // works on any JSONL regardless of binding presence.
+      try {
+        const workspaceId = await getActiveWorkspaceId()
+        const initialPlanStepId =
+          body?.initialPlanStepId && body.initialPlanStepId.trim().length > 0
+            ? body.initialPlanStepId
+            : lane.id
+        await upsertThreadCardBinding({
+          workspaceId,
+          agentId: result.agentId,
+          agentKind,
+          planStepId: initialPlanStepId,
+          source: "launch",
+          spawnOrigin: "cockpit",
+          surface,
+          role: "exec",
+          createdBy: auth.identity ?? null,
+          rationale: "lane exec create-new (CLI surface)",
+        })
+      } catch (e) {
+        console.warn(
+          "[exec] exec-binding upsert failed (non-fatal):",
+          e instanceof Error ? e.message : e
+        )
+      }
       return NextResponse.json({
         ok: true,
         lane: updated,
