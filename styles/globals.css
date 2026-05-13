@@ -345,32 +345,48 @@
  */
 @keyframes chat-pulse-glow {
   0%, 100% {
-    opacity: 0.35;
+    opacity: 0.45;
   }
   50% {
-    opacity: 0.9;
+    opacity: 1;
   }
 }
+/* Layered inset shadows produce a richer falloff than a single ring:
+ * an outer wide halo (huge blur + large spread) eats well into the
+ * chat surface, an inner medium layer concentrates color near the
+ * edges so the falloff toward center reads as a gradient rather than
+ * a flat wash. Peak alpha lands at ~0.6-0.7 when the @keyframes
+ * opacity hits 1.0; resting is ~0.3 — visible but never noisy. */
 .chat-pulse-working {
   animation: chat-pulse-glow 3s ease-in-out infinite;
-  box-shadow: inset 0 0 28px 4px rgb(56 189 248 / 0.45); /* sky-400 */
+  box-shadow:
+    inset 0 0 140px 48px rgb(56 189 248 / 0.55), /* sky-400 wide halo */
+    inset 0 0 60px 8px rgb(2 132 199 / 0.65);    /* sky-600 inner */
 }
 :is(.dark) .chat-pulse-working {
-  box-shadow: inset 0 0 28px 4px rgb(125 211 252 / 0.40); /* sky-300 */
+  box-shadow:
+    inset 0 0 140px 48px rgb(125 211 252 / 0.55), /* sky-300 wide halo */
+    inset 0 0 60px 8px rgb(56 189 248 / 0.65);    /* sky-400 inner */
 }
 .chat-pulse-idle {
   animation: chat-pulse-glow 3s ease-in-out infinite;
-  box-shadow: inset 0 0 28px 4px rgb(248 113 113 / 0.40); /* red-400 */
+  box-shadow:
+    inset 0 0 140px 48px rgb(248 113 113 / 0.55), /* red-400 wide halo */
+    inset 0 0 60px 8px rgb(220 38 38 / 0.65);     /* red-600 inner */
 }
 :is(.dark) .chat-pulse-idle {
-  box-shadow: inset 0 0 28px 4px rgb(252 165 165 / 0.35); /* red-300 */
+  box-shadow:
+    inset 0 0 140px 48px rgb(252 165 165 / 0.55), /* red-300 wide halo */
+    inset 0 0 60px 8px rgb(248 113 113 / 0.65);   /* red-400 inner */
 }
-/* Reduced-motion: keep the colored inset ring — color still conveys
- * state — but drop the pulse so we don't induce vestibular noise. */
+/* Reduced-motion: keep the layered colored inset glow — color still
+ * conveys state — but drop the pulse so we don't induce vestibular
+ * noise. Hold at ~70% of peak so the static glow still reads at a
+ * glance. */
 @media (prefers-reduced-motion: reduce) {
   .chat-pulse-working,
   .chat-pulse-idle {
     animation: none;
-    opacity: 0.6;
+    opacity: 0.7;
   }
 }
