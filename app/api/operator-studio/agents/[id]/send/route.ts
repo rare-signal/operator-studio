@@ -1,22 +1,24 @@
 /**
  * POST /api/operator-studio/agents/:id/send
- * Body: { text?: string, keys?: string[], submit?: boolean, app?: string }
+ * Body: { text?: string, keys?: string[], submit?: boolean }
  *
  *   - tmux:<name>  → tmux send-keys: literal text first, then named keys
- *   - claude:<id>  → pbcopy + osascript activate "Claude" + paste + return
- *   - codex:<id>   → same as claude, defaults app to "Codex"
+ *   - claude:<id>  → `claude --resume <id> --print <text>` (CLI-only)
+ *   - codex:<id>   → not implemented yet (codex-cli resume parity work)
  *
- * For app-kind agents, `app` overrides the default app name (e.g.
- * "Cursor", "Antigravity") so the same path can drive any GUI agent.
+ * CLI-only as of 2026-05-12. The retired AX clipboard+paste path is
+ * gone; legacy bindings with `surface = 'desktop'` are still serviced
+ * by CLI-resume — `claude --resume` works on any JSONL session in
+ * `~/.claude/projects/`, whether it was originally spawned by Desktop
+ * or by CLI. So an exec can still chat into a thread that was created
+ * via Claude Desktop, just without ever activating Claude.app.
  */
 
 import { NextResponse, type NextRequest } from "next/server"
 
 import { authorizeRequest } from "@/lib/operator-studio/auth"
 import { sendKeysToTmux } from "@/lib/server/agent-bridge/tmux"
-import { sendToApp } from "@/lib/server/agent-bridge/app-control"
-import { focusByDeepLink } from "@/lib/server/agent-bridge/app-deeplink-focus"
-import { focusDesktopSession } from "@/lib/server/agent-bridge/app-session-focus"
+import { sendToClaudeCli } from "@/lib/server/agent-bridge/claude-cli-send"
 import { isValidJsonlId, isValidSessionName } from "@/lib/server/agent-bridge/exec"
 import { isHotModeArmed } from "@/lib/server/agent-bridge/hot-mode"
 import { parseAgentId } from "@/lib/server/agent-bridge/types"
@@ -55,15 +57,8 @@ export async function POST(
     ? body.keys.filter((k: unknown): k is string => typeof k === "string")
     : []
   const submit = body.submit === undefined ? undefined : !!body.submit
-  const image = typeof body.image === "string" ? body.image : ""
 
   if (parsed.kind === "tmux") {
-    if (image) {
-      return NextResponse.json(
-        { error: "tmux panes don't accept image attachments." },
-        { status: 400 }
-      )
-    }
     if (!isValidSessionName(parsed.ref)) {
       return NextResponse.json(
         { error: "Invalid tmux session name" },
@@ -86,79 +81,50 @@ export async function POST(
   if (!isValidJsonlId(parsed.ref)) {
     return NextResponse.json({ error: "Invalid session id" }, { status: 400 })
   }
-  // GUI apps: default the app name from the agent kind but accept an
-  // override so callers can target Cursor / Antigravity / Kiro / etc.
-  const defaultApp = parsed.kind === "claude" ? "Claude" : "Codex"
-  const appName = typeof body.app === "string" ? body.app : defaultApp
 
-  // ── Session focus pre-flight ──────────────────────────────────────
-  // Primary path: deep-link via Claude Desktop's claude:// URL handler.
-  // `claude://claude.ai/resume?session=<uuid>` calls the main process's
-  // LocalSessionManager.importCliSession (idempotent — already-imported
-  // sessions are unarchived and reused) and dispatches navigate to the
-  // session route. This brings the *specific* CLI session to the front
-  // in Claude Desktop's single-window UI before paste fires, fixing the
-  // 50/50 split routing bug where every paste landed in whichever chat
-  // happened to be frontmost.
-  //
-  // Opt-out: OPERATOR_STUDIO_DEEPLINK_FOCUS_DISABLED=1 falls back to the
-  // original "paste into whatever window is frontmost" behavior.
-  //
-  // Legacy chat-picker path (focusDesktopSession): kept behind
-  // OPERATOR_STUDIO_ENABLE_SESSION_FOCUS=1 for completeness, but the
-  // deep-link path is strictly better — works without guessing
-  // keyboard shortcuts and is the same mechanism Claude Desktop uses
-  // for its own internal navigation.
-  if (parsed.kind === "claude" && body.focusSession !== false) {
-    const f = await focusByDeepLink({
-      kind: parsed.kind,
-      sessionId: parsed.ref,
+  // CLI-only send path. Works for both:
+  //   - CLI-spawned sessions (binding.surface = 'claude-cli')
+  //   - Legacy Desktop-spawned sessions (binding.surface = 'desktop')
+  // The session id is just a UUID for a JSONL on disk; `claude --resume`
+  // doesn't care which app originally created it.
+  if (parsed.kind === "claude") {
+    if (keys.length > 0) {
+      return NextResponse.json(
+        {
+          error:
+            "Key sequences aren't applicable for CLI sessions — pass `text` only.",
+        },
+        { status: 400 }
+      )
+    }
+    const r = await sendToClaudeCli({ sessionId: parsed.ref, text })
+    if (!r.ok) {
+      return NextResponse.json(
+        { error: r.error, stage: r.stage, stderr: r.stderr },
+        { status: r.status }
+      )
+    }
+    return NextResponse.json({
+      ok: true,
+      at: new Date().toISOString(),
+      sentTextLength: r.sentTextLength,
+      sentKeys: [],
+      submitted: true,
+      mode: "cli-resume",
+      surface: "claude-cli",
+      durationMs: r.durationMs,
     })
-    if ("error" in f) {
-      return NextResponse.json({ error: f.error }, { status: f.status })
-    }
-  } else if (
-    process.env.OPERATOR_STUDIO_ENABLE_SESSION_FOCUS?.trim() === "1" &&
-    typeof body.sessionTitle === "string" &&
-    body.sessionTitle.trim().length > 0 &&
-    body.focusSession !== false
-  ) {
-    const f = await focusDesktopSession({
-      app: appName,
-      sessionTitle: body.sessionTitle.trim(),
-    })
-    if ("error" in f) {
-      return NextResponse.json({ error: f.error }, { status: f.status })
-    }
   }
 
-  // ── Interrupt mode ────────────────────────────────────────────────
-  // Default = "queue" (current behavior — paste sits in the input;
-  // Claude reads it on its next turn). "interrupt" sends Esc first to
-  // cancel the in-flight response so the new prompt fires immediately.
-  // Both modes go through the existing sendToApp pipeline.
-  const mode: "queue" | "interrupt" =
-    body.mode === "interrupt" ? "interrupt" : "queue"
-  if (mode === "interrupt") {
-    const stop = await sendToApp({ app: appName, keys: ["escape"] })
-    if ("error" in stop) {
-      return NextResponse.json({ error: `interrupt failed: ${stop.error}` }, { status: stop.status })
-    }
-    // Tiny settle so the in-flight stream flushes before we paste.
-    await new Promise((r) => setTimeout(r, 250))
-  }
-
-  const r = await sendToApp({ app: appName, text, keys, submit, image })
-  if ("error" in r) {
-    return NextResponse.json({ error: r.error }, { status: r.status })
-  }
-  return NextResponse.json({
-    ok: true,
-    at: new Date().toISOString(),
-    sentTextLength: r.sentTextLength,
-    sentKeys: r.sentKeys,
-    submitted: r.submitted,
-    sentImageBytes: r.sentImageBytes,
-    mode,
-  })
+  // codex:<id> — CLI-resume parity for Codex is not yet implemented.
+  // Bento can still READ the JSONL via app-sessions; for now the operator
+  // sends into the live Codex via tmux or directly in the Codex CLI's
+  // interactive shell. Returning 501 instead of silently routing to AX.
+  return NextResponse.json(
+    {
+      error:
+        "codex-cli resume send is not implemented yet — read-only for now.",
+    },
+    { status: 501 }
+  )
 }

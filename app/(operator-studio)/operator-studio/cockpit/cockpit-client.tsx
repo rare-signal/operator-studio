@@ -1,7 +1,16 @@
 "use client"
 
 import * as React from "react"
-import { ArrowLeft, ChevronDown, ChevronUp, Home, Plus, X } from "lucide-react"
+import { useSearchParams } from "next/navigation"
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Home,
+  Plus,
+  X,
+} from "lucide-react"
 
 import {
   BentoPane,
@@ -10,12 +19,56 @@ import {
 } from "@/app/2/v2/components/bento-view"
 import { SoundToggle } from "../components/sound-toggle"
 import { useSound } from "../components/sound-context"
+import { MarshalRegion } from "./marshal-region"
 import type {
   AgentListItem,
   AgentCompositeId,
   AgentKind,
 } from "@/lib/server/agent-bridge/types"
 import type { AppStatus } from "@/lib/server/agent-bridge/app-sessions"
+
+// Mirrors `LaneTaskCard` from `lib/operator-studio/work-lane-tasks.ts`.
+// Inlined here to keep this client component free of server-only
+// imports (the helper is server-only because it touches the DB).
+type LaneTaskStatusClient =
+  | "open"
+  | "in-motion"
+  | "covered"
+  | "skipped"
+interface LaneTaskCard {
+  id: string
+  title: string
+  description: string | null
+  status: LaneTaskStatusClient
+  updatedAt: string
+  createdAt: string
+}
+
+// Active rail in the bottom drawer. Mobile shows one at a time via a
+// switcher; the planned desktop-sidebar reveal will render both
+// simultaneously, at which point this state becomes per-pane.
+type CockpitRail = "workers" | "tasks" | "artifacts"
+const COCKPIT_RAIL_KEY = "operator-studio:cockpit:active-rail"
+function readCockpitRail(): CockpitRail {
+  try {
+    const raw = window.localStorage.getItem(COCKPIT_RAIL_KEY)
+    if (raw === "workers" || raw === "tasks" || raw === "artifacts") return raw
+    // Migrate the V2-era "activity" key to its renamed-2026-05-12
+    // counterpart so existing users don't fall back to the workers tab
+    // on first load.
+    if (raw === "activity") {
+      try {
+        window.localStorage.setItem(COCKPIT_RAIL_KEY, "artifacts")
+      } catch {
+        /* ignore */
+      }
+      return "artifacts"
+    }
+  } catch {
+    /* ignore */
+  }
+  return "workers"
+}
 
 type ReviewStatus =
   | "live"
@@ -41,6 +94,11 @@ interface SpawnedByWorker {
   reviewStatus: ReviewStatus
   berthierReviewedAt?: string | null
   humanApprovedAt?: string | null
+  /** Title of the plan_step this worker is bound to — the operator-
+   *  meaningful name that says WHAT the worker is for ("Marshal tier",
+   *  "CLI quota baseline"). Beats the JSONL kickoff title for telling
+   *  workers apart in the rail at a glance. Falls back when null. */
+  planStepTitle?: string | null
 }
 
 // Multi-tier review sort: awaiting-berthier-check > berthier-reviewed
@@ -79,9 +137,12 @@ const HOME_PREFIX = "/operator-studio"
 import {
   LaneEntryView,
   type EnrichedWorkLanePickerLane,
-  getStoredActiveLaneId,
+  decideFirstPaint,
+  getSessionActiveLaneId,
+  setSessionActiveLaneId,
   setStoredActiveLaneId,
 } from "./lane-picker"
+import { buildArtifactItems } from "@/lib/operator-studio/cockpit-artifact-grouping"
 
 interface CockpitClientProps {
   workspaceId: string
@@ -106,6 +167,13 @@ export default function CockpitClient({
   const [lanesError, setLanesError] = React.useState<string | null>(null)
   const [lanesLoaded, setLanesLoaded] = React.useState(false)
   const [activeLaneId, setActiveLaneId] = React.useState<string | null>(null)
+  // Desktop = wide viewport reveal layer; at >= 1024px the rail
+  // expands from a tab switcher into a three-column workers/tasks/
+  // activity side-by-side panel. The timeline-as-toggle button on the
+  // top rail was removed (V2): activity is now a tab inside the rail
+  // alongside workers and tasks — one unified component per David's
+  // 2026-05-12 feedback on the conflation.
+  const isDesktop = useIsDesktop()
 
   const refreshLanes = React.useCallback(async () => {
     try {
@@ -131,19 +199,23 @@ export default function CockpitClient({
     }
   }, [workspaceId])
 
-  // First-load: fetch lanes; if localStorage hint matches a live lane,
-  // open it. Otherwise stay in the picker view. (No auto-route into the
-  // first lane — that's the bug we're fixing.)
+  // First-load: fetch lanes; only auto-jump if the IN-TAB session
+  // marker says the user already picked a lane in THIS browser session
+  // AND the lane is still in the live list. A pure localStorage hint
+  // (cross-session breadcrumb) is NOT enough — cold loads, new tabs,
+  // and fresh app launches all surface the picker. Reloading within
+  // the same tab (cmd-R) preserves the sessionStorage marker, so David
+  // lands back in the lane he was inside.
   const didInitRef = React.useRef(false)
   React.useEffect(() => {
     if (didInitRef.current) return
     didInitRef.current = true
     ;(async () => {
       const list = await refreshLanes()
-      const hint = getStoredActiveLaneId(workspaceId)
-      if (hint && Array.isArray(list) && list.some((l) => l.id === hint)) {
-        setActiveLaneId(hint)
-      }
+      const sessionHint = getSessionActiveLaneId(workspaceId)
+      const ids = Array.isArray(list) ? list.map((l) => l.id) : []
+      const decision = decideFirstPaint(sessionHint, ids)
+      if (decision.kind === "lane") setActiveLaneId(decision.laneId)
     })()
   }, [refreshLanes, workspaceId])
 
@@ -160,13 +232,33 @@ export default function CockpitClient({
     (laneId: string) => {
       setActiveLaneId(laneId)
       setStoredActiveLaneId(workspaceId, laneId)
+      setSessionActiveLaneId(workspaceId, laneId)
     },
     [workspaceId]
   )
   const backToLanes = React.useCallback(() => {
     setActiveLaneId(null)
     setStoredActiveLaneId(workspaceId, null)
+    setSessionActiveLaneId(workspaceId, null)
   }, [workspaceId])
+
+  // Query-string deeplink: ?lane=<id> auto-selects the lane on load and
+  // whenever the URL param changes, provided it matches a known lane in
+  // the live list. Lets David (or anyone) bookmark/share a URL that
+  // jumps straight into a particular cockpit instead of the picker.
+  // Purely additive — does not override the sessionStorage hint or the
+  // user's explicit picks; the param is just another input that calls
+  // selectLane like any tap on the lane card would.
+  const searchParams = useSearchParams()
+  const queryLaneId = searchParams?.get("lane") ?? null
+  const lastAppliedQueryLaneRef = React.useRef<string | null>(null)
+  React.useEffect(() => {
+    if (!queryLaneId) return
+    if (lastAppliedQueryLaneRef.current === queryLaneId) return
+    if (!lanes.some((l) => l.id === queryLaneId)) return
+    lastAppliedQueryLaneRef.current = queryLaneId
+    selectLane(queryLaneId)
+  }, [queryLaneId, lanes, selectLane])
 
   const activeLane = React.useMemo(
     () => lanes.find((l) => l.id === activeLaneId) ?? null,
@@ -256,6 +348,42 @@ export default function CockpitClient({
     }
   }, [])
 
+  // Lane tasks — polled separately from workers. Drives the cockpit
+  // Tasks rail (mobile switcher between Workers/Tasks; on a future
+  // desktop layout both rails render side-by-side). Empty when the
+  // lane has no anchor plan_step yet.
+  const [laneTasks, setLaneTasks] = React.useState<LaneTaskCard[]>([])
+  const [laneCardStepId, setLaneCardStepId] = React.useState<string | null>(
+    null
+  )
+  const refreshTasks = React.useCallback(async () => {
+    if (!activeLaneId) {
+      setLaneTasks([])
+      setLaneCardStepId(null)
+      return
+    }
+    try {
+      const r = await fetch(
+        `/api/operator-studio/work-lanes/${encodeURIComponent(activeLaneId)}/tasks`,
+        { cache: "no-store" }
+      )
+      if (!r.ok) return
+      const data = (await r.json()) as {
+        tasks?: LaneTaskCard[]
+        laneCardStepId?: string | null
+      }
+      setLaneTasks(Array.isArray(data?.tasks) ? data.tasks : [])
+      setLaneCardStepId(data?.laneCardStepId ?? null)
+    } catch {
+      /* ignore */
+    }
+  }, [activeLaneId])
+  React.useEffect(() => {
+    refreshTasks()
+    const id = window.setInterval(refreshTasks, 6_000)
+    return () => window.clearInterval(id)
+  }, [refreshTasks])
+
   // Spawned workers — authoritative via /cockpit/spawned-by, which
   // joins operator_thread_card_bindings on spawned_by_agent_id. Empty
   // until this exec actually originates a worker (binding rows are
@@ -295,10 +423,42 @@ export default function CockpitClient({
     }
   }, [execId])
 
-  const exec = React.useMemo(
-    () => agents.find((a) => a.id === execId) ?? null,
-    [agents, execId]
-  )
+  // Exec resolution prefers the live AgentListItem from the recent-
+  // agents poll (richer status / title / project). When the exec isn't
+  // in that list yet — fresh spawn, aged-out beyond the appLimit cap,
+  // or first-paint race — fall back to a placeholder built from the
+  // lane's enriched exec block. The lane row carries enough to render
+  // the BentoPane without flickering back to the "pick an exec" UI
+  // (Bug 2: `lane.execAgentId` is the source of truth).
+  const exec = React.useMemo<AgentListItem | null>(() => {
+    if (!execId) return null
+    const live = agents.find((a) => a.id === execId)
+    if (live) return live
+    const fallback = activeLane?.exec ?? null
+    if (!fallback || fallback.agentId !== execId) return null
+    const kind: AgentKind =
+      fallback.agentKind === "codex"
+        ? "codex"
+        : fallback.agentKind === "tmux"
+          ? "tmux"
+          : "claude"
+    const sourceField: "claude" | "codex" | "tmux" =
+      kind === "tmux" ? "tmux" : kind === "codex" ? "codex" : "claude"
+    return {
+      id: execId,
+      kind,
+      label:
+        fallback.label ??
+        execId.split(":").slice(1).join(":").slice(0, 8),
+      source: sourceField,
+      lastActivityAt:
+        fallback.lastActivityAt ?? new Date(0).toISOString(),
+      status: "idle",
+      project: null,
+      title: fallback.label,
+      isLive: fallback.isLive,
+    }
+  }, [agents, execId, activeLane])
   const spawnedWorkers = React.useMemo<AgentListItem[]>(() => {
     if (!execId) return []
     const active = spawnedByWorkers.filter(
@@ -316,10 +476,54 @@ export default function CockpitClient({
         w.source === "tmux" || w.source === "claude" || w.source === "codex"
           ? w.source
           : "claude"
+      // Label preference: plan_step.title (what the worker is FOR) →
+      // JSONL kickoff title (what the worker said first) → agent-id
+      // tail. Lets David see "Marshal tier" / "CLI quota baseline" /
+      // "Error watching" at a glance instead of three identical
+      // 8-char hashes.
+      const preferredLabel =
+        w.planStepTitle ??
+        w.label ??
+        w.agentId.split(":").slice(1).join(":").slice(0, 8)
       return {
         id: w.agentId as AgentCompositeId,
         kind,
-        label: w.label ?? w.agentId.split(":").slice(1).join(":").slice(0, 8),
+        label: preferredLabel,
+        source: w.source,
+        lastActivityAt: w.lastActivityAt ?? w.spawnedAt,
+        status: w.status,
+        project: w.project,
+        title: w.title,
+        isLive: w.isLive,
+      }
+    })
+  }, [spawnedByWorkers, execId])
+  // Recently-completed workers — the subset of spawnedByWorkers whose
+  // bindings are detached. The exec doesn't render in this list either.
+  // Kept separate from `spawnedWorkers` so WorkersList can render an
+  // explicit "Completed" section below the active rows.
+  const completedSpawnedWorkers = React.useMemo<AgentListItem[]>(() => {
+    if (!execId) return []
+    const detached = spawnedByWorkers.filter(
+      (w) => !w.active && w.agentId !== execId
+    )
+    // Most-recent first by spawnedAt (server-sorted ascending, so
+    // reverse).
+    detached.sort((a, b) => b.spawnedAt.localeCompare(a.spawnedAt))
+    return detached.map((w) => {
+      const kind: AgentKind =
+        w.source === "tmux" || w.source === "claude" || w.source === "codex"
+          ? w.source
+          : "claude"
+      // Same label preference as active workers.
+      const preferredLabel =
+        w.planStepTitle ??
+        w.label ??
+        w.agentId.split(":").slice(1).join(":").slice(0, 8)
+      return {
+        id: w.agentId as AgentCompositeId,
+        kind,
+        label: preferredLabel,
         source: w.source,
         lastActivityAt: w.lastActivityAt ?? w.spawnedAt,
         status: w.status,
@@ -504,6 +708,47 @@ export default function CockpitClient({
     }
   }
 
+  // Spawn a fresh CLI chat as this lane's exec. The backend route
+  // handles hot-mode gating, kickoff prompt construction
+  // (buildBerthierKickoff), spawn + reconcile, and finally setLaneExec.
+  // CLI-only as of 2026-05-12 — the prior Desktop AX path is gone.
+  // `kind` chooses Claude (Opus 4.7) vs Codex; both spawn via their
+  // respective CLI surface adapters.
+  const [creatingFreshExec, setCreatingFreshExec] = React.useState(false)
+  const [creatingError, setCreatingError] = React.useState<string | null>(null)
+  const createFreshExec = React.useCallback(
+    async (kind: "claude-cli" | "codex-cli") => {
+      if (!activeLaneId) return
+      setCreatingFreshExec(true)
+      setCreatingError(null)
+      try {
+        const appKind = kind === "codex-cli" ? "codex" : "claude"
+        const r = await fetch(
+          `/api/operator-studio/work-lanes/${encodeURIComponent(activeLaneId)}/exec`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              create: true,
+              appKind,
+              ...(kind === "claude-cli" ? { model: "claude-opus-4-7" } : {}),
+            }),
+          }
+        )
+        const data = (await r.json().catch(() => ({}))) as { error?: string }
+        if (!r.ok) {
+          throw new Error(data?.error ?? `HTTP ${r.status}`)
+        }
+      } catch (e) {
+        setCreatingError(e instanceof Error ? e.message : "create failed")
+      } finally {
+        setCreatingFreshExec(false)
+        await refreshLanes()
+      }
+    },
+    [activeLaneId, refreshLanes]
+  )
+
   async function clearExec() {
     if (!activeLaneId) return
     setWorkerId(null)
@@ -578,13 +823,22 @@ export default function CockpitClient({
 
       <div className="flex-1 min-h-0 flex flex-col">
         {!exec ? (
-          // STATE A — no exec: full-screen pick list.
+          // STATE A — no exec: full-screen pick list with the new
+          // "+ Create fresh exec for this lane" CTA on top (Bug 3).
           <PickList
             title="Pick an executive"
-            subtitle="Promote any recent chat to drive this lane. Once picked it gets the full viewport until you spawn a worker from inside it."
+            subtitle="Promote any recent chat to drive this lane, or spawn a fresh chat as the lane's executive."
             agents={agents}
             error={agentsError}
             onPick={pickExec}
+            topAction={
+              <CreateFreshExecCta
+                busy={creatingFreshExec}
+                error={creatingError}
+                onCreate={createFreshExec}
+                onDismissError={() => setCreatingError(null)}
+              />
+            }
           />
         ) : worker ? (
           // STATE D — worker open: 50/50 split, OR full viewport when one
@@ -667,30 +921,13 @@ export default function CockpitClient({
               }
             />
           )
-        ) : spawnedWorkers.length === 0 ? (
-          // STATE B — exec set, no spawned workers: exec fills screen.
-          // (Workers slot stays hidden until the spawn-linkage lift
-          //  lands and `spawnedWorkers` becomes authoritative.)
-          <Pane className="flex-1 min-h-0">
-            <BentoPane
-              key={`exec:${exec.id}`}
-              agent={exec}
-              active
-              planSteps={[]}
-              linkedStepId={null}
-              onLinkStep={noop}
-              homePrefix={HOME_PREFIX}
-              planId={null}
-              hotMode={hotMode?.armed === true}
-              isPinned={false}
-              onTogglePin={noop}
-              mobileFocused
-            />
-          </Pane>
         ) : (
-          // STATE C — exec set, N workers, none picked: exec on top
-          // (filling whatever the workers list doesn't take), workers
-          // list on bottom auto-sized but capped at 50% via max-h.
+          // STATE B+C unified — exec set, no worker picked.
+          // Always render the WorkersList rail (even with 0 workers)
+          // so the "+ new worker" affordance is reachable. The rail's
+          // height is owned by `useRailHeight` inside WorkersList; the
+          // exec pane fills whatever remains. Maximize button on the
+          // exec pane still hides the rail to grant full viewport.
           <>
             <Pane className="flex-1 min-h-0 border-b border-stone-200 dark:border-stone-800">
               <BentoPane
@@ -706,17 +943,36 @@ export default function CockpitClient({
                 isPinned={false}
                 onTogglePin={noop}
                 mobileFocused
+                isMaximized={maximizedAgentId === exec.id}
+                onToggleMaximize={() =>
+                  setMaximizedAgentId(
+                    maximizedAgentId === exec.id ? null : exec.id
+                  )
+                }
               />
             </Pane>
-            <Pane className="shrink-0 max-h-1/2 overflow-y-auto">
-              <WorkersList
-                workers={spawnedWorkers}
-                workerSequenceByAgentId={workerSequenceByAgentId}
-                reviewStatusByAgentId={reviewStatusByAgentId}
-                onPick={(id) => setWorkerId(id)}
-                onTapBerthierReviewedPill={(id) => setAckModalAgentId(id)}
-              />
-            </Pane>
+            {maximizedAgentId !== exec.id && (
+              <Pane className="shrink-0">
+                <RailSwitcher
+                  workers={spawnedWorkers}
+                  completedWorkers={completedSpawnedWorkers}
+                  workerSequenceByAgentId={workerSequenceByAgentId}
+                  reviewStatusByAgentId={reviewStatusByAgentId}
+                  onPickWorker={(id) => setWorkerId(id)}
+                  onTapBerthierReviewedPill={(id) => setAckModalAgentId(id)}
+                  laneId={activeLane?.id ?? null}
+                  onSpawned={refreshLanes}
+                  tasks={laneTasks}
+                  laneCardStepId={laneCardStepId}
+                  onTasksChanged={refreshTasks}
+                  isDesktop={isDesktop}
+                  marshalLaneId={activeLane?.id ?? null}
+                  onOpenMarshalChat={(id) =>
+                    setWorkerId(id as AgentCompositeId)
+                  }
+                />
+              </Pane>
+            )}
           </>
         )}
       </div>
@@ -952,18 +1208,121 @@ function Pane({
   )
 }
 
+function CreateFreshExecCta({
+  busy,
+  error,
+  onCreate,
+  onDismissError,
+}: {
+  busy: boolean
+  error: string | null
+  onCreate: (kind: "claude-cli" | "codex-cli") => void | Promise<void>
+  onDismissError: () => void
+}) {
+  const [expanded, setExpanded] = React.useState(false)
+  const [kind, setKind] = React.useState<"claude-cli" | "codex-cli">("claude-cli")
+  if (!expanded) {
+    return (
+      <>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setExpanded(true)}
+          className="w-full inline-flex items-center justify-center gap-2 px-3 py-3 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[13px] font-semibold disabled:opacity-50"
+        >
+          <Plus className="h-4 w-4" />
+          {busy
+            ? "Spawning fresh exec…"
+            : "Create fresh exec for this lane"}
+        </button>
+        {error && (
+          <div
+            role="alert"
+            className="mt-2 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300"
+          >
+            <div className="flex items-start gap-2">
+              <span className="flex-1">{error}</span>
+              <button
+                type="button"
+                onClick={onDismissError}
+                className="text-red-500 hover:text-red-700"
+                aria-label="Dismiss error"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    )
+  }
+  return (
+    <div className="rounded-md border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 p-2">
+      <div className="text-[11.5px] text-stone-600 dark:text-stone-300 mb-1.5">
+        Spawn a fresh chat as this lane&apos;s executive. Hot mode must
+        be armed.
+      </div>
+      <div className="flex items-center gap-1 mb-2">
+        {(["claude-cli", "codex-cli"] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            disabled={busy}
+            onClick={() => setKind(k)}
+            className={`px-2 py-1 rounded text-[11.5px] uppercase tracking-wider font-semibold ${
+              kind === k
+                ? "bg-emerald-600 text-white"
+                : "bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-200"
+            } disabled:opacity-50`}
+          >
+            {k === "claude-cli" ? "Claude CLI · Opus 4.7" : "Codex CLI"}
+          </button>
+        ))}
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={async () => {
+            await onCreate(kind)
+            setExpanded(false)
+          }}
+          className="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[12.5px] font-semibold disabled:opacity-50"
+        >
+          {busy ? "Spawning…" : `Spawn ${kind === "claude-cli" ? "Claude" : "Codex"} exec`}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setExpanded(false)}
+          className="px-2 py-2 rounded-md text-[12px] text-stone-500 hover:text-stone-700"
+        >
+          Cancel
+        </button>
+      </div>
+      {error && (
+        <div className="mt-2 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300">
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PickList({
   title,
   subtitle,
   agents,
   error,
   onPick,
+  topAction,
 }: {
   title: string
   subtitle: string
   agents: AgentListItem[]
   error: string | null
   onPick: (id: AgentCompositeId) => void
+  topAction?: React.ReactNode
 }) {
   return (
     <div className="flex-1 min-h-0 overflow-y-auto">
@@ -975,6 +1334,7 @@ function PickList({
           {subtitle}
         </div>
       </div>
+      {topAction ? <div className="px-3 pb-2">{topAction}</div> : null}
       {error ? (
         <div className="mx-3 mb-2 rounded border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300">
           Couldn't load agents: {error}
@@ -995,44 +1355,1197 @@ function PickList({
   )
 }
 
+type WorkersSortBy = "created" | "last-updated"
+const WORKERS_SORT_KEY = "operator-studio:cockpit:workers-sort-by"
+
+function readWorkersSortBy(): WorkersSortBy {
+  try {
+    const raw = window.localStorage.getItem(WORKERS_SORT_KEY)
+    if (raw === "created" || raw === "last-updated") return raw
+  } catch {
+    /* ignore */
+  }
+  return "created"
+}
+
+// ─── Workers rail height (drag-to-resize) ─────────────────────────────────
+//
+// Mirrors `useSplitRatio` (1453): persists a number to localStorage,
+// clamps within [min, max], doubleTap reset. Stored as a pixel value so
+// the rail respects min-row-height across viewport sizes; the upper
+// bound is computed from viewport height at apply time.
+const RAIL_HEIGHT_KEY = "operator-studio:cockpit:workers-rail-height"
+const RAIL_MIN_PX = 80
+const RAIL_DEFAULT_PX = 220
+function railMaxPx(): number {
+  if (typeof window === "undefined") return 800
+  return Math.max(RAIL_MIN_PX, Math.floor(window.innerHeight * 0.8))
+}
+function clampRailHeight(h: number): number {
+  if (!Number.isFinite(h)) return RAIL_DEFAULT_PX
+  return Math.min(railMaxPx(), Math.max(RAIL_MIN_PX, h))
+}
+
+function useRailHeight(): [number, (h: number) => void, () => void] {
+  const [h, setHState] = React.useState<number>(RAIL_DEFAULT_PX)
+  React.useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(RAIL_HEIGHT_KEY)
+      if (raw) {
+        const n = Number(raw)
+        if (Number.isFinite(n)) setHState(clampRailHeight(n))
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+  const setH = React.useCallback((next: number) => {
+    const clamped = clampRailHeight(next)
+    setHState(clamped)
+    try {
+      window.localStorage.setItem(RAIL_HEIGHT_KEY, String(clamped))
+    } catch {
+      /* ignore */
+    }
+  }, [])
+  const reset = React.useCallback(() => setH(RAIL_DEFAULT_PX), [setH])
+  return [h, setH, reset]
+}
+
 function WorkersList({
   workers,
+  completedWorkers,
   workerSequenceByAgentId,
   reviewStatusByAgentId,
   onPick,
   onTapBerthierReviewedPill,
+  laneId,
+  onSpawned,
+  embedded,
+  marshalLaneId,
+  onOpenMarshalChat,
 }: {
   workers: AgentListItem[]
+  /** Workers whose bindings are detached. Rendered as a collapsible
+   *  "Completed" section below the active rows, separated by a thin
+   *  divider. Defaults to empty so older callers don't break. */
+  completedWorkers?: AgentListItem[]
   workerSequenceByAgentId: Map<string, number>
   reviewStatusByAgentId?: Map<string, ReviewStatus>
   onPick: (id: AgentCompositeId) => void
   onTapBerthierReviewedPill?: (id: AgentCompositeId) => void
+  /** When set, the "+ new worker" affordance is rendered. Tap opens an
+   *  inline form; submit POSTs to /work-lanes/[id]/spawn-worker. */
+  laneId?: string | null
+  onSpawned?: () => void
+  /** True when WorkersList is embedded in the desktop three-column
+   *  layout. Disables its own height + drag handle (the parent
+   *  RailSwitcher owns both at desktop). The internal rail header
+   *  collapses to a thin "+ new worker" bar with no resize affordance. */
+  embedded?: boolean
+  /** When set, renders the MarshalRegion pinned sticky-top inside the
+   *  workers scroll list — appears as the always-visible first item
+   *  in the spawned drawer, scrolling workers tucking underneath it. */
+  marshalLaneId?: string | null
+  onOpenMarshalChat?: (agentId: string) => void
 }) {
+  // Sort posture: DESCENDING by chosen field (newest at top — the
+  // most-recent spawn or most-recent activity is what David wants
+  // to see first when scanning). Default sort field = 'created'
+  // (stable spawn order via workerSequence; doesn't jump around as
+  // workers grind). Toggle to 'last-updated' to see the most-
+  // recently-active worker at the top. Persisted to localStorage.
+  const [sortBy, setSortByState] = React.useState<WorkersSortBy>("created")
+  React.useEffect(() => {
+    setSortByState(readWorkersSortBy())
+  }, [])
+  const setSortBy = React.useCallback((next: WorkersSortBy) => {
+    setSortByState(next)
+    try {
+      window.localStorage.setItem(WORKERS_SORT_KEY, next)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const sortedWorkers = React.useMemo(() => {
+    const copy = [...workers]
+    if (sortBy === "created") {
+      copy.sort((a, b) => {
+        // Descending by workerSequence (HIGHER = newer = top).
+        // Workers without sequence sink to the bottom so the
+        // sequenced ones stay chronological.
+        const sa = workerSequenceByAgentId.get(a.id)
+        const sb = workerSequenceByAgentId.get(b.id)
+        if (sa === undefined && sb === undefined) {
+          return b.lastActivityAt.localeCompare(a.lastActivityAt)
+        }
+        if (sa === undefined) return 1
+        if (sb === undefined) return -1
+        return sb - sa
+      })
+    } else {
+      // Descending by last-activity timestamp (newest at top).
+      copy.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
+    }
+    return copy
+  }, [workers, workerSequenceByAgentId, sortBy])
+
+  // Spawn form state. Hidden until "+" is tapped. CLI-only as of
+  // 2026-05-12 — the form chooses between Claude CLI (Opus 4.7) and
+  // Codex CLI; the retired Desktop AX path is not reachable from here.
+  const [spawnOpen, setSpawnOpen] = React.useState(false)
+  const [spawnPrompt, setSpawnPrompt] = React.useState("")
+  const [spawnAppKind, setSpawnAppKind] = React.useState<"claude" | "codex">(
+    "claude"
+  )
+  const [spawnBusy, setSpawnBusy] = React.useState(false)
+  const [spawnError, setSpawnError] = React.useState<string | null>(null)
+
+  const submitSpawn = React.useCallback(async () => {
+    if (!laneId) return
+    const prompt = spawnPrompt.trim()
+    if (!prompt) {
+      setSpawnError("prompt required")
+      return
+    }
+    setSpawnBusy(true)
+    setSpawnError(null)
+    try {
+      const r = await fetch(
+        `/api/operator-studio/work-lanes/${encodeURIComponent(laneId)}/spawn-worker`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            appKind: spawnAppKind,
+            ...(spawnAppKind === "claude"
+              ? { model: "claude-opus-4-7" }
+              : {}),
+          }),
+        }
+      )
+      const data = (await r.json().catch(() => ({}))) as { error?: string }
+      if (!r.ok) {
+        throw new Error(data?.error ?? `HTTP ${r.status}`)
+      }
+      setSpawnOpen(false)
+      setSpawnPrompt("")
+      onSpawned?.()
+    } catch (e) {
+      setSpawnError(e instanceof Error ? e.message : "spawn failed")
+    } finally {
+      setSpawnBusy(false)
+    }
+  }, [laneId, spawnPrompt, spawnAppKind, onSpawned])
+
+  // Feature 1 — Drag-to-resize rail height. The header doubles as the
+  // drag handle (sort buttons and "+" stop propagation so taps still
+  // work). The container's height is owned here and persisted via
+  // `useRailHeight`.
+  const [railHeight, setRailHeight] = useRailHeight()
+  const dragStateRef = React.useRef<{
+    startClientY: number
+    startHeight: number
+    pointerId: number
+  } | null>(null)
+  const lastTapRef = React.useRef<number>(0)
+
+  const onHeaderPointerDown = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      // Don't initiate drag if the pointerdown was on a child button
+      // (those stopPropagation themselves, but be defensive).
+      e.preventDefault()
+      ;(e.currentTarget as Element).setPointerCapture?.(e.pointerId)
+      dragStateRef.current = {
+        startClientY: e.clientY,
+        startHeight: railHeight,
+        pointerId: e.pointerId,
+      }
+    },
+    [railHeight]
+  )
+  const onHeaderPointerMove = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const drag = dragStateRef.current
+      if (!drag || drag.pointerId !== e.pointerId) return
+      // Drag UP on the header → rail grows (header is at top of rail).
+      const delta = drag.startClientY - e.clientY
+      setRailHeight(drag.startHeight + delta)
+    },
+    [setRailHeight]
+  )
+  const onHeaderPointerUp = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      ;(e.currentTarget as Element).releasePointerCapture?.(e.pointerId)
+      dragStateRef.current = null
+    },
+    []
+  )
+  const onHeaderClick = React.useCallback(() => {
+    const now = Date.now()
+    if (now - lastTapRef.current < 350) {
+      setRailHeight(RAIL_DEFAULT_PX)
+      lastTapRef.current = 0
+    } else {
+      lastTapRef.current = now
+    }
+  }, [setRailHeight])
+
   return (
-    <div>
-      <div className="sticky top-0 z-10 px-3 py-1 border-b border-stone-200 dark:border-stone-800 bg-stone-100/95 dark:bg-stone-900/95 backdrop-blur text-[10px] uppercase tracking-wider text-stone-500">
-        Workers spawned by exec
+    <div
+      className={
+        embedded
+          ? "flex flex-col flex-1 min-h-0"
+          : "flex flex-col"
+      }
+      style={
+        embedded
+          ? { touchAction: "none" }
+          : { height: railHeight, touchAction: "none" }
+      }
+      data-testid="cockpit-workers-rail"
+    >
+      <div
+        role={embedded ? undefined : "separator"}
+        aria-orientation={embedded ? undefined : "horizontal"}
+        aria-label={embedded ? undefined : "Drag to resize workers rail"}
+        onPointerDown={embedded ? undefined : onHeaderPointerDown}
+        onPointerMove={embedded ? undefined : onHeaderPointerMove}
+        onPointerUp={embedded ? undefined : onHeaderPointerUp}
+        onPointerCancel={embedded ? undefined : onHeaderPointerUp}
+        onClick={embedded ? undefined : onHeaderClick}
+        onDoubleClick={
+          embedded ? undefined : () => setRailHeight(RAIL_DEFAULT_PX)
+        }
+        className={`sticky top-0 z-10 px-3 py-1 border-b border-stone-200 dark:border-stone-800 bg-stone-100/95 dark:bg-stone-900/95 backdrop-blur flex items-center gap-2 select-none ${
+          embedded ? "" : "cursor-ns-resize"
+        }`}
+        data-workers-rail-header
+        title={embedded ? undefined : "Drag to resize. Double-tap to reset."}
+      >
+        <span className="text-[10px] uppercase tracking-wider text-stone-500 pointer-events-none">
+          {embedded ? "Spawned" : "Workers spawned by exec"}
+        </span>
+        {laneId && (
+          <button
+            type="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              setSpawnOpen((v) => !v)
+            }}
+            className="inline-flex items-center justify-center h-5 w-5 rounded border border-stone-300 dark:border-stone-700 text-stone-600 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-stone-800"
+            aria-label={spawnOpen ? "Close new worker form" : "New worker"}
+            title="Spawn a new worker (Berthier-bypass)"
+            data-testid="cockpit-spawn-worker-button"
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        )}
+        <span
+          onPointerDown={(e) => e.stopPropagation()}
+          className="ml-auto inline-flex rounded-md border border-stone-300 dark:border-stone-700 overflow-hidden text-[9.5px] uppercase tracking-wider"
+        >
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              setSortBy("created")
+            }}
+            className={`px-2 py-0.5 ${
+              sortBy === "created"
+                ? "bg-stone-700 text-white dark:bg-stone-200 dark:text-stone-900"
+                : "bg-transparent text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
+            }`}
+            aria-pressed={sortBy === "created"}
+            title="Sort by spawn order (descending — newest at top)"
+          >
+            Created
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              setSortBy("last-updated")
+            }}
+            className={`px-2 py-0.5 border-l border-stone-300 dark:border-stone-700 ${
+              sortBy === "last-updated"
+                ? "bg-stone-700 text-white dark:bg-stone-200 dark:text-stone-900"
+                : "bg-transparent text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
+            }`}
+            aria-pressed={sortBy === "last-updated"}
+            title="Sort by last activity (descending — most-recently-active at top)"
+          >
+            Updated
+          </button>
+        </span>
       </div>
-      <ul className="divide-y divide-stone-200 dark:divide-stone-800">
-        {workers.map((a) => {
-          const tier = reviewStatusByAgentId?.get(a.id) ?? null
-          return (
+      {spawnOpen && laneId && (
+        <div
+          className="px-3 py-2 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-950 flex flex-col gap-2"
+          data-testid="cockpit-spawn-worker-form"
+        >
+          <textarea
+            value={spawnPrompt}
+            onChange={(e) => setSpawnPrompt(e.target.value)}
+            placeholder="Prompt for the new worker…"
+            rows={3}
+            className="w-full text-[12px] rounded border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-900 px-2 py-1 resize-y"
+            disabled={spawnBusy}
+          />
+          <div className="flex items-center gap-2">
+            <label className="text-[10px] uppercase tracking-wider text-stone-500">
+              App
+              <select
+                value={spawnAppKind}
+                onChange={(e) =>
+                  setSpawnAppKind(
+                    e.target.value === "codex" ? "codex" : "claude"
+                  )
+                }
+                disabled={spawnBusy}
+                className="ml-1 rounded border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-900 text-[11px] px-1 py-0.5 normal-case tracking-normal"
+              >
+                <option value="claude">Claude</option>
+                <option value="codex">Codex</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={submitSpawn}
+              disabled={spawnBusy || spawnPrompt.trim().length === 0}
+              className="ml-auto rounded bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900 text-[11px] px-2 py-1 disabled:opacity-50"
+            >
+              {spawnBusy ? "Spawning…" : "Spawn"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSpawnOpen(false)
+                setSpawnError(null)
+              }}
+              disabled={spawnBusy}
+              className="rounded border border-stone-300 dark:border-stone-700 text-[11px] px-2 py-1 text-stone-600 dark:text-stone-300"
+            >
+              Cancel
+            </button>
+          </div>
+          {spawnError && (
+            <p className="text-[11px] text-red-600 dark:text-red-400">
+              {spawnError}
+            </p>
+          )}
+        </div>
+      )}
+      {sortedWorkers.length === 0 && !marshalLaneId ? (
+        <div
+          className="px-3 py-4 text-[12px] text-stone-500 dark:text-stone-400 text-center"
+          data-testid="cockpit-workers-empty"
+        >
+          {laneId
+            ? "No workers yet — tap + to spawn one."
+            : "No workers yet."}
+        </div>
+      ) : (
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {marshalLaneId && (
+          <div
+            className="sticky top-0 z-10 shadow-md"
+            data-testid="marshal-pinned-top"
+          >
+            <MarshalRegion
+              laneId={marshalLaneId}
+              onOpenChat={onOpenMarshalChat}
+            />
+          </div>
+        )}
+        {sortedWorkers.length === 0 ? (
+          <div
+            className="px-3 py-4 text-[12px] text-stone-500 dark:text-stone-400 text-center"
+            data-testid="cockpit-workers-empty"
+          >
+            {laneId
+              ? "No workers yet — tap + to spawn one."
+              : "No workers yet."}
+          </div>
+        ) : (
+          <ul className="divide-y divide-stone-200 dark:divide-stone-800">
+            {sortedWorkers.map((a) => {
+              const tier = reviewStatusByAgentId?.get(a.id) ?? null
+              return (
+                <AgentRow
+                  key={a.id}
+                  agent={a}
+                  workerSequence={workerSequenceByAgentId.get(a.id) ?? null}
+                  reviewStatus={tier}
+                  onPick={onPick}
+                  onTapPill={
+                    tier === "berthier-reviewed" && onTapBerthierReviewedPill
+                      ? onTapBerthierReviewedPill
+                      : undefined
+                  }
+                />
+              )
+            })}
+          </ul>
+        )}
+      </div>
+      )}
+      {completedWorkers && completedWorkers.length > 0 && (
+        <CompletedWorkersSection
+          workers={completedWorkers}
+          workerSequenceByAgentId={workerSequenceByAgentId}
+          onPick={onPick}
+        />
+      )}
+    </div>
+  )
+}
+
+// ─── CompletedWorkersSection ──────────────────────────────────────────────
+// Collapsible "recently completed" rail tail. Surfaces workers whose
+// bindings have been detached (marked done / auto-detached) so David
+// can scan what shipped without losing them from the rail entirely.
+// Default collapsed at mobile, expanded at desktop where there's room.
+function CompletedWorkersSection({
+  workers,
+  workerSequenceByAgentId,
+  onPick,
+}: {
+  workers: AgentListItem[]
+  workerSequenceByAgentId: Map<string, number>
+  onPick: (id: AgentCompositeId) => void
+}) {
+  const [open, setOpen] = React.useState<boolean>(false)
+  React.useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(
+        "operator-studio:cockpit:completed-workers-open"
+      )
+      if (stored === "1") setOpen(true)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+  const toggle = React.useCallback(() => {
+    setOpen((prev) => {
+      const next = !prev
+      try {
+        window.localStorage.setItem(
+          "operator-studio:cockpit:completed-workers-open",
+          next ? "1" : "0"
+        )
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }, [])
+  return (
+    <div
+      className="border-t-2 border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-950/40"
+      data-testid="cockpit-completed-workers"
+    >
+      <button
+        type="button"
+        onClick={toggle}
+        className="w-full flex items-center justify-between px-3 py-1.5 text-[10px] uppercase tracking-wider text-stone-500 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-stone-800/60"
+        aria-expanded={open}
+      >
+        <span>
+          Completed{" "}
+          <span className="text-stone-400 dark:text-stone-500">
+            ({workers.length})
+          </span>
+        </span>
+        <span aria-hidden>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <ul className="divide-y divide-stone-200 dark:divide-stone-800">
+          {workers.map((a) => (
             <AgentRow
               key={a.id}
               agent={a}
               workerSequence={workerSequenceByAgentId.get(a.id) ?? null}
-              reviewStatus={tier}
+              reviewStatus={null}
               onPick={onPick}
-              onTapPill={
-                tier === "berthier-reviewed" && onTapBerthierReviewedPill
-                  ? onTapBerthierReviewedPill
-                  : undefined
-              }
             />
-          )
-        })}
-      </ul>
+          ))}
+        </ul>
+      )}
     </div>
+  )
+}
+
+// ─── Rail switcher (mobile) ───────────────────────────────────────────────
+// Wraps WorkersList and TasksList in a tab-strip header so the bottom
+// drawer can host either rail. Defaults to "workers" (preserves the
+// current UX). On the planned desktop layout (sibling card
+// `step-cockpit-desktop-resolution-sidebar`) this component will be
+// bypassed entirely — both rails will render side-by-side instead.
+function RailSwitcher({
+  workers,
+  completedWorkers,
+  workerSequenceByAgentId,
+  reviewStatusByAgentId,
+  onPickWorker,
+  onTapBerthierReviewedPill,
+  laneId,
+  onSpawned,
+  tasks,
+  laneCardStepId,
+  onTasksChanged,
+  isDesktop,
+  marshalLaneId,
+  onOpenMarshalChat,
+}: {
+  workers: AgentListItem[]
+  /** Workers spawned by this exec whose bindings have been detached
+   *  (marked done / auto-detached). Rendered as a "Completed" section
+   *  inside WorkersList. */
+  completedWorkers: AgentListItem[]
+  workerSequenceByAgentId: Map<string, number>
+  reviewStatusByAgentId?: Map<string, ReviewStatus>
+  onPickWorker: (id: AgentCompositeId) => void
+  onTapBerthierReviewedPill?: (id: AgentCompositeId) => void
+  laneId?: string | null
+  onSpawned?: () => void
+  tasks: LaneTaskCard[]
+  laneCardStepId: string | null
+  onTasksChanged: () => void
+  /** When true (viewport >= ~1024px), render all three panels side-by-
+   *  side instead of behind a tab switcher. Sibling cards:
+   *  `step-cockpit-desktop-resolution-sidebar`,
+   *  `step-cockpit-horizontal-timeline-view`. */
+  isDesktop?: boolean
+  /** Plumbing for the pinned Marshal region inside WorkersList. Sticky-
+   *  top inside the workers scroll container so the Marshal stays
+   *  visible regardless of scroll position in the workers list. */
+  marshalLaneId?: string | null
+  onOpenMarshalChat?: (agentId: string) => void
+}) {
+  const [rail, setRailState] = React.useState<CockpitRail>("workers")
+  const handleJumpToStep = React.useCallback((stepId: string) => {
+    const ev = new CustomEvent("cockpit:jump-to-step", {
+      detail: { stepId },
+    })
+    window.dispatchEvent(ev)
+  }, [])
+
+  // Desktop layout owns the rail-row height — at desktop the three
+  // columns each have their own internal scroll, but the row itself
+  // resizes via a single drag handle here. Same useRailHeight key
+  // (`operator-studio:cockpit:workers-rail-height`) as the mobile rails
+  // so the resize state is shared across layouts.
+  const [desktopRailHeight, setDesktopRailHeight] = useRailHeight()
+  const dragStateRef = React.useRef<{
+    startClientY: number
+    startHeight: number
+    pointerId: number
+  } | null>(null)
+  const lastTapRef = React.useRef<number>(0)
+  const onDragPointerDown = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      ;(e.currentTarget as Element).setPointerCapture?.(e.pointerId)
+      dragStateRef.current = {
+        startClientY: e.clientY,
+        startHeight: desktopRailHeight,
+        pointerId: e.pointerId,
+      }
+    },
+    [desktopRailHeight]
+  )
+  const onDragPointerMove = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const drag = dragStateRef.current
+      if (!drag || drag.pointerId !== e.pointerId) return
+      const delta = drag.startClientY - e.clientY
+      setDesktopRailHeight(drag.startHeight + delta)
+    },
+    [setDesktopRailHeight]
+  )
+  const onDragPointerUp = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      ;(e.currentTarget as Element).releasePointerCapture?.(e.pointerId)
+      dragStateRef.current = null
+    },
+    []
+  )
+  const onDragClick = React.useCallback(() => {
+    const now = Date.now()
+    if (now - lastTapRef.current < 350) {
+      setDesktopRailHeight(RAIL_DEFAULT_PX)
+      lastTapRef.current = 0
+    } else {
+      lastTapRef.current = now
+    }
+  }, [setDesktopRailHeight])
+  React.useEffect(() => {
+    setRailState(readCockpitRail())
+  }, [])
+  const setRail = React.useCallback((next: CockpitRail) => {
+    setRailState(next)
+    try {
+      window.localStorage.setItem(COCKPIT_RAIL_KEY, next)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  // At desktop resolution (>= 1024px) all three panels render side-by-
+  // side so the operator sees workers AND tasks AND the lane activity
+  // at a glance. The mobile/narrow experience stays exactly the same:
+  // a single panel behind a tab switcher.
+  if (isDesktop) {
+    return (
+      <div
+        className="flex flex-col"
+        style={{ height: desktopRailHeight, touchAction: "none" }}
+        data-testid="cockpit-rail-switcher"
+        data-rail-layout="desktop-side-by-side"
+      >
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Drag to resize the rail (workers / tasks / activity)"
+          onPointerDown={onDragPointerDown}
+          onPointerMove={onDragPointerMove}
+          onPointerUp={onDragPointerUp}
+          onPointerCancel={onDragPointerUp}
+          onClick={onDragClick}
+          onDoubleClick={() => setDesktopRailHeight(RAIL_DEFAULT_PX)}
+          className="shrink-0 h-2 border-b border-stone-300 dark:border-stone-700 bg-stone-200/70 dark:bg-stone-800/70 hover:bg-stone-300 dark:hover:bg-stone-700 cursor-ns-resize select-none flex items-center justify-center"
+          title="Drag to resize the rail. Double-tap to reset."
+        >
+          <span className="block w-10 h-0.5 bg-stone-400 dark:bg-stone-500 rounded" aria-hidden />
+        </div>
+        <div className="flex flex-row flex-1 min-h-0 overflow-hidden">
+          <div className="flex-1 min-w-0 min-h-0 border-r border-stone-200 dark:border-stone-800 flex flex-col">
+            <WorkersList
+              workers={workers}
+              completedWorkers={completedWorkers}
+              workerSequenceByAgentId={workerSequenceByAgentId}
+              reviewStatusByAgentId={reviewStatusByAgentId}
+              onPick={onPickWorker}
+              onTapBerthierReviewedPill={onTapBerthierReviewedPill}
+              laneId={laneId}
+              onSpawned={onSpawned}
+              embedded
+              marshalLaneId={marshalLaneId}
+              onOpenMarshalChat={onOpenMarshalChat}
+            />
+          </div>
+          <div className="flex-1 min-w-0 min-h-0 border-r border-stone-200 dark:border-stone-800 flex flex-col">
+            <TasksList
+              tasks={tasks}
+              laneId={laneId ?? null}
+              laneCardStepId={laneCardStepId}
+              onChanged={onTasksChanged}
+              embedded
+            />
+          </div>
+          <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+            <div className="px-3 py-1 border-b border-stone-200 dark:border-stone-800 bg-stone-100/95 dark:bg-stone-900/95">
+              <span className="text-[10px] uppercase tracking-wider text-stone-500">
+                Artifacts
+              </span>
+            </div>
+            <ArtifactsList laneId={laneId ?? null} onJumpToStep={handleJumpToStep} />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col" data-testid="cockpit-rail-switcher">
+      <div className="px-2 py-1 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-950 flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => setRail("workers")}
+          className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded ${
+            rail === "workers"
+              ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
+              : "text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
+          }`}
+          aria-pressed={rail === "workers"}
+          data-testid="cockpit-rail-switch-workers"
+        >
+          Workers
+        </button>
+        <button
+          type="button"
+          onClick={() => setRail("tasks")}
+          className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded ${
+            rail === "tasks"
+              ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
+              : "text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
+          }`}
+          aria-pressed={rail === "tasks"}
+          data-testid="cockpit-rail-switch-tasks"
+        >
+          Tasks
+        </button>
+        <button
+          type="button"
+          onClick={() => setRail("artifacts")}
+          className={`text-[10px] uppercase tracking-wider px-2 py-1 rounded ${
+            rail === "artifacts"
+              ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
+              : "text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
+          }`}
+          aria-pressed={rail === "artifacts"}
+          data-testid="cockpit-rail-switch-artifacts"
+        >
+          Artifacts
+        </button>
+      </div>
+      {rail === "workers" ? (
+        <WorkersList
+          workers={workers}
+          completedWorkers={completedWorkers}
+          workerSequenceByAgentId={workerSequenceByAgentId}
+          reviewStatusByAgentId={reviewStatusByAgentId}
+          onPick={onPickWorker}
+          onTapBerthierReviewedPill={onTapBerthierReviewedPill}
+          laneId={laneId}
+          onSpawned={onSpawned}
+          marshalLaneId={marshalLaneId}
+          onOpenMarshalChat={onOpenMarshalChat}
+        />
+      ) : rail === "tasks" ? (
+        <TasksList
+          tasks={tasks}
+          laneId={laneId ?? null}
+          laneCardStepId={laneCardStepId}
+          onChanged={onTasksChanged}
+        />
+      ) : (
+        <ArtifactsList laneId={laneId ?? null} onJumpToStep={handleJumpToStep} />
+      )}
+    </div>
+  )
+}
+
+// ─── TasksList ────────────────────────────────────────────────────────────
+// Mirror of WorkersList for plan-card tasks. Same drag-resize header,
+// same sort toggle (created / last-updated), same inline "+" create
+// form pattern. Status flips via PATCH `/tasks`.
+//
+// MODAL-EXTRACTION NOTE (surprise discovered while wiring this in): the
+// brief said to reuse the "plan-page card-create modal". There isn't
+// one — `app/2/v2/components/plan-view.tsx#addCard` just inserts a
+// placeholder "New step" inline via `persistSteps`. The closest
+// existing pattern is the cockpit's inline spawn form (WorkersList
+// above). Building a modal here would be an invention, not a reuse, so
+// we mirror the inline-form pattern instead. If a real card-create
+// modal lands later, both rails should adopt it together.
+type TasksSortBy = "created" | "last-updated"
+const TASKS_SORT_KEY = "operator-studio:cockpit:tasks-sort-by"
+function readTasksSortBy(): TasksSortBy {
+  try {
+    const raw = window.localStorage.getItem(TASKS_SORT_KEY)
+    if (raw === "created" || raw === "last-updated") return raw
+  } catch {
+    /* ignore */
+  }
+  return "last-updated"
+}
+
+const TASK_STATUS_RANK: Record<LaneTaskStatusClient, number> = {
+  open: 0,
+  "in-motion": 1,
+  covered: 2,
+  skipped: 3,
+}
+
+function statusPillClass(s: LaneTaskStatusClient): string {
+  switch (s) {
+    case "open":
+      return "bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-300"
+    case "in-motion":
+      return "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+    case "covered":
+      return "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+    case "skipped":
+      return "bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-500"
+  }
+}
+
+function TasksList({
+  tasks,
+  laneId,
+  laneCardStepId,
+  onChanged,
+  embedded,
+}: {
+  tasks: LaneTaskCard[]
+  laneId: string | null
+  laneCardStepId: string | null
+  onChanged: () => void
+  /** True when TasksList is embedded in the desktop three-column
+   *  layout. Disables its own height + drag handle (the parent
+   *  RailSwitcher owns both at desktop). */
+  embedded?: boolean
+}) {
+  const [sortBy, setSortByState] = React.useState<TasksSortBy>("last-updated")
+  React.useEffect(() => {
+    setSortByState(readTasksSortBy())
+  }, [])
+  const setSortBy = React.useCallback((next: TasksSortBy) => {
+    setSortByState(next)
+    try {
+      window.localStorage.setItem(TASKS_SORT_KEY, next)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const sortedTasks = React.useMemo(() => {
+    const copy = [...tasks]
+    copy.sort((a, b) => {
+      // Open/in-motion float above covered/skipped regardless of sort.
+      const rDelta = TASK_STATUS_RANK[a.status] - TASK_STATUS_RANK[b.status]
+      if (rDelta !== 0) return rDelta
+      const aKey = sortBy === "created" ? a.createdAt : a.updatedAt
+      const bKey = sortBy === "created" ? b.createdAt : b.updatedAt
+      return bKey.localeCompare(aKey)
+    })
+    return copy
+  }, [tasks, sortBy])
+
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [addTitle, setAddTitle] = React.useState("")
+  const [addDesc, setAddDesc] = React.useState("")
+  const [addBusy, setAddBusy] = React.useState(false)
+  const [addError, setAddError] = React.useState<string | null>(null)
+
+  const submitAdd = React.useCallback(async () => {
+    if (!laneId) return
+    const title = addTitle.trim()
+    if (!title) {
+      setAddError("title required")
+      return
+    }
+    setAddBusy(true)
+    setAddError(null)
+    try {
+      const r = await fetch(
+        `/api/operator-studio/work-lanes/${encodeURIComponent(laneId)}/add-task`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title, description: addDesc.trim() || undefined }),
+        }
+      )
+      const data = (await r.json().catch(() => ({}))) as { error?: string }
+      if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`)
+      setAddOpen(false)
+      setAddTitle("")
+      setAddDesc("")
+      onChanged()
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : "add-task failed")
+    } finally {
+      setAddBusy(false)
+    }
+  }, [laneId, addTitle, addDesc, onChanged])
+
+  const [railHeight, setRailHeight] = useRailHeight()
+  const dragStateRef = React.useRef<{
+    startClientY: number
+    startHeight: number
+    pointerId: number
+  } | null>(null)
+  const lastTapRef = React.useRef<number>(0)
+  const onHeaderPointerDown = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      ;(e.currentTarget as Element).setPointerCapture?.(e.pointerId)
+      dragStateRef.current = {
+        startClientY: e.clientY,
+        startHeight: railHeight,
+        pointerId: e.pointerId,
+      }
+    },
+    [railHeight]
+  )
+  const onHeaderPointerMove = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const drag = dragStateRef.current
+      if (!drag || drag.pointerId !== e.pointerId) return
+      const delta = drag.startClientY - e.clientY
+      setRailHeight(drag.startHeight + delta)
+    },
+    [setRailHeight]
+  )
+  const onHeaderPointerUp = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      ;(e.currentTarget as Element).releasePointerCapture?.(e.pointerId)
+      dragStateRef.current = null
+    },
+    []
+  )
+  const onHeaderClick = React.useCallback(() => {
+    const now = Date.now()
+    if (now - lastTapRef.current < 350) {
+      setRailHeight(RAIL_DEFAULT_PX)
+      lastTapRef.current = 0
+    } else {
+      lastTapRef.current = now
+    }
+  }, [setRailHeight])
+
+  const canAdd = !!laneId && !!laneCardStepId
+
+  return (
+    <div
+      className={
+        embedded ? "flex flex-col flex-1 min-h-0" : "flex flex-col"
+      }
+      style={
+        embedded
+          ? { touchAction: "none" }
+          : { height: railHeight, touchAction: "none" }
+      }
+      data-testid="cockpit-tasks-rail"
+    >
+      <div
+        role={embedded ? undefined : "separator"}
+        aria-orientation={embedded ? undefined : "horizontal"}
+        aria-label={embedded ? undefined : "Drag to resize tasks rail"}
+        onPointerDown={embedded ? undefined : onHeaderPointerDown}
+        onPointerMove={embedded ? undefined : onHeaderPointerMove}
+        onPointerUp={embedded ? undefined : onHeaderPointerUp}
+        onPointerCancel={embedded ? undefined : onHeaderPointerUp}
+        onClick={embedded ? undefined : onHeaderClick}
+        onDoubleClick={
+          embedded ? undefined : () => setRailHeight(RAIL_DEFAULT_PX)
+        }
+        className={`sticky top-0 z-10 px-3 py-1 border-b border-stone-200 dark:border-stone-800 bg-stone-100/95 dark:bg-stone-900/95 backdrop-blur flex items-center gap-2 select-none ${
+          embedded ? "" : "cursor-ns-resize"
+        }`}
+        data-tasks-rail-header
+        title={embedded ? undefined : "Drag to resize. Double-tap to reset."}
+      >
+        <span className="text-[10px] uppercase tracking-wider text-stone-500 pointer-events-none">
+          {embedded ? "Lane tasks" : "Tasks for this lane"}
+        </span>
+        {canAdd && (
+          <button
+            type="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              setAddOpen((v) => !v)
+            }}
+            className="inline-flex items-center justify-center h-5 w-5 rounded border border-stone-300 dark:border-stone-700 text-stone-600 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-stone-800"
+            aria-label={addOpen ? "Close new task form" : "Add task"}
+            title="Add a new task to this lane"
+            data-testid="cockpit-add-task-button"
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        )}
+        <span
+          onPointerDown={(e) => e.stopPropagation()}
+          className="ml-auto inline-flex rounded-md border border-stone-300 dark:border-stone-700 overflow-hidden text-[9.5px] uppercase tracking-wider"
+        >
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              setSortBy("created")
+            }}
+            className={`px-2 py-0.5 ${
+              sortBy === "created"
+                ? "bg-stone-700 text-white dark:bg-stone-200 dark:text-stone-900"
+                : "bg-transparent text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
+            }`}
+            aria-pressed={sortBy === "created"}
+            title="Sort by creation time (descending)"
+          >
+            Created
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              setSortBy("last-updated")
+            }}
+            className={`px-2 py-0.5 border-l border-stone-300 dark:border-stone-700 ${
+              sortBy === "last-updated"
+                ? "bg-stone-700 text-white dark:bg-stone-200 dark:text-stone-900"
+                : "bg-transparent text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
+            }`}
+            aria-pressed={sortBy === "last-updated"}
+            title="Sort by last activity (descending)"
+          >
+            Updated
+          </button>
+        </span>
+      </div>
+      {addOpen && canAdd && (
+        <div
+          className="px-3 py-2 border-b border-stone-200 dark:border-stone-800 bg-stone-50 dark:bg-stone-950 flex flex-col gap-2"
+          data-testid="cockpit-add-task-form"
+        >
+          <input
+            type="text"
+            value={addTitle}
+            onChange={(e) => setAddTitle(e.target.value)}
+            placeholder="Task title"
+            className="w-full text-[12px] rounded border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-900 px-2 py-1"
+            disabled={addBusy}
+          />
+          <textarea
+            value={addDesc}
+            onChange={(e) => setAddDesc(e.target.value)}
+            placeholder="Description (optional)"
+            rows={3}
+            className="w-full text-[12px] rounded border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-900 px-2 py-1 resize-y"
+            disabled={addBusy}
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={submitAdd}
+              disabled={addBusy || addTitle.trim().length === 0}
+              className="ml-auto rounded bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900 text-[11px] px-2 py-1 disabled:opacity-50"
+            >
+              {addBusy ? "Adding…" : "Add task"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAddOpen(false)
+                setAddError(null)
+              }}
+              disabled={addBusy}
+              className="rounded border border-stone-300 dark:border-stone-700 text-[11px] px-2 py-1 text-stone-600 dark:text-stone-300"
+            >
+              Cancel
+            </button>
+          </div>
+          {addError && (
+            <p className="text-[11px] text-red-600 dark:text-red-400">
+              {addError}
+            </p>
+          )}
+        </div>
+      )}
+      {sortedTasks.length === 0 ? (
+        <div
+          className="px-3 py-4 text-[12px] text-stone-500 dark:text-stone-400 text-center"
+          data-testid="cockpit-tasks-empty"
+        >
+          {canAdd
+            ? "No tasks yet — tap + to add one."
+            : "No tasks yet."}
+        </div>
+      ) : (
+        <ul className="divide-y divide-stone-200 dark:divide-stone-800 flex-1 min-h-0 overflow-y-auto">
+          {sortedTasks.map((t) => (
+            <TaskRow
+              key={t.id}
+              task={t}
+              laneId={laneId}
+              onChanged={onChanged}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function TaskRow({
+  task,
+  laneId,
+  onChanged,
+}: {
+  task: LaneTaskCard
+  laneId: string | null
+  onChanged: () => void
+}) {
+  const [expanded, setExpanded] = React.useState(false)
+  const [busy, setBusy] = React.useState(false)
+  const setStatus = React.useCallback(
+    async (next: LaneTaskStatusClient) => {
+      if (!laneId || busy) return
+      setBusy(true)
+      try {
+        const r = await fetch(
+          `/api/operator-studio/work-lanes/${encodeURIComponent(laneId)}/tasks`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ stepId: task.id, status: next }),
+          }
+        )
+        if (r.ok) onChanged()
+      } finally {
+        setBusy(false)
+      }
+    },
+    [laneId, busy, task.id, onChanged]
+  )
+  const nextStatuses: LaneTaskStatusClient[] = [
+    "open",
+    "in-motion",
+    "covered",
+  ]
+  return (
+    <li className="px-3 py-2" data-testid="cockpit-task-row">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span
+          className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${statusPillClass(task.status)}`}
+          data-testid="cockpit-task-status-pill"
+        >
+          {task.status}
+        </span>
+        <span className="text-[12px] flex-1 truncate">{task.title}</span>
+        {expanded ? (
+          <ChevronUp className="h-3 w-3 text-stone-400" />
+        ) : (
+          <ChevronDown className="h-3 w-3 text-stone-400" />
+        )}
+      </button>
+      {expanded && (
+        <div className="mt-2 flex flex-col gap-2">
+          {task.description && (
+            <p className="text-[11px] text-stone-600 dark:text-stone-400 whitespace-pre-wrap">
+              {task.description}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-1">
+            {nextStatuses.map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStatus(s)}
+                disabled={busy || s === task.status}
+                className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                  s === task.status
+                    ? "border-stone-400 text-stone-500"
+                    : "border-stone-300 dark:border-stone-700 text-stone-700 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-stone-800"
+                } disabled:opacity-50`}
+                data-testid={`cockpit-task-status-${s}`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </li>
   )
 }
 
@@ -1546,4 +3059,557 @@ function formatRelative(iso: string) {
   if (h < 24) return `${h}h ago`
   const d = Math.round(h / 24)
   return `${d}d ago`
+}
+
+// ─── useIsDesktop hook ────────────────────────────────────────────────────
+// True when the viewport is at least the given breakpoint wide. Used by
+// the desktop-resolution reveal layer (sibling card
+// `step-cockpit-desktop-resolution-sidebar`) to show workers + tasks
+// side-by-side instead of behind a tab switcher.
+function useIsDesktop(breakpoint = 1024) {
+  const [isDesktop, setIsDesktop] = React.useState(false)
+  React.useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return
+    const mq = window.matchMedia(`(min-width: ${breakpoint}px)`)
+    setIsDesktop(mq.matches)
+    const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches)
+    mq.addEventListener("change", handler)
+    return () => mq.removeEventListener("change", handler)
+  }, [breakpoint])
+  return isDesktop
+}
+
+// ─── ArtifactsList (renamed from ActivityList 2026-05-12) ─────────────────
+// Vertical chronological log of the lane's artifacts — every card pulled
+// in, every status flip, every field note, every worker session. Lives
+// as the "Artifacts" tab in the rail switcher (David 2026-05-12: "It's
+// going to be kind of your little sort of timeline of artifacts as
+// they're created").
+//
+// Doctrine: `memory/feedback_cockpit_is_execution_layer.md`. Schema
+// evolution to support arbitrary artifact_kinds tracked in plan card
+// `step-lane-artifacts-arbitrary-types`.
+//
+// Visual design notes:
+// - **Timestamps don't compress dangerously.** "1 day ago" loses
+//   resolution — you can't tell if two same-day events were 3 min apart
+//   or 3 hr apart. Recent events show relative ("3m ago"); older
+//   events switch to absolute ("May 12 · 2:14p") so the eye can read
+//   the actual time-of-day.
+// - **Jagged-tear gap indicator.** Between consecutive events whose
+//   delta exceeds GAP_THRESHOLD_MS, render a thin torn-paper divider
+//   row with the gap duration. Conveys "time passed here" without
+//   compressing the events themselves.
+interface TimelineEvent {
+  id: string
+  laneId: string
+  planStepId: string
+  eventKind: string
+  at: string
+  actorAgentId: string | null
+  note: string | null
+  cardTitle: string | null
+  cardStatus: string | null
+  /** Present only on synthetic `chat-burst` rows — counts of turns that
+   *  happened in the window between adjacent real artifact events. */
+  chatBurst?: {
+    fromAt: string
+    toAt: string
+    turnCount: number
+    userCount: number
+    assistantCount: number
+    toolUseCount: number
+    thinkingCount: number
+  }
+}
+
+const TIMELINE_GLYPH: Record<string, string> = {
+  pulled_in: "↘",
+  created_in_lane: "✦",
+  started: "▶",
+  marked_in_motion: "◆",
+  covered: "✓",
+  skipped: "—",
+  removed_from_lane: "✗",
+  note: "·",
+}
+
+function timelineDayBucket(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  if (sameDay) return "Today"
+  const yest = new Date(now)
+  yest.setDate(now.getDate() - 1)
+  const sameYest =
+    d.getFullYear() === yest.getFullYear() &&
+    d.getMonth() === yest.getMonth() &&
+    d.getDate() === yest.getDate()
+  if (sameYest) return "Yesterday"
+  const diffDays = Math.floor((now.getTime() - d.getTime()) / 86_400_000)
+  if (diffDays < 7) return "This week"
+  if (diffDays < 14) return "Last week"
+  return "Older"
+}
+
+// Gap threshold: when consecutive events are more than this far apart
+// in time, draw a jagged-tear divider between them with the duration
+// of the gap. 20 minutes is the threshold David's eye starts to feel
+// "wait, what happened in between."
+const GAP_THRESHOLD_MS = 20 * 60_000
+
+// Family-grouping window: consecutive same-kind events within the same
+// day-bucket and within this window collapse into one expressive row.
+// 5 min matches the rhythm of a single agentic burst — long enough to
+// catch a worker landing 6 cards in a row, short enough that genuinely
+// separate beats stay separate.
+const FAMILY_WINDOW_MS = 5 * 60_000
+
+// LocalStorage prefix for per-group expand state. Group id is derived
+// deterministically from lane_id + first member's event id so the open
+// state survives a refresh without depending on the volatile members.
+const ARTIFACT_GROUP_LS_PREFIX = "cockpit:artifact-group:"
+
+function formatGapDuration(ms: number): string {
+  if (ms < 60_000) return ""
+  const min = Math.round(ms / 60_000)
+  if (min < 60) return `${min} min later`
+  const h = Math.round(min / 60)
+  if (h < 24) return `${h} hr later`
+  const d = Math.round(h / 24)
+  return `${d} day${d === 1 ? "" : "s"} later`
+}
+
+// Granular timestamp that preserves resolution at older ages instead
+// of collapsing to "1d ago". Returns relative for things in the last
+// 6 hours; switches to weekday + time for the past week; absolute date
+// + time beyond that. Mirrors the "don't compress useful signal" rule
+// David called out.
+function formatArtifactTime(iso: string): string {
+  const d = new Date(iso)
+  if (!Number.isFinite(d.getTime())) return ""
+  const now = Date.now()
+  const ms = now - d.getTime()
+  if (ms < 0) return "just now"
+  if (ms < 60_000) return "just now"
+  if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)}m ago`
+  if (ms < 6 * 60 * 60_000) return `${Math.round(ms / (60 * 60_000))}h ago`
+  // Past 6 hours — show wall-clock time so 3-min-apart and 3-hr-apart
+  // stop looking the same. Within 7 days, prepend weekday.
+  const time = d
+    .toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    .replace(/\s?(AM|PM)/i, (_m, ap: string) => ap.toLowerCase().slice(0, 1))
+  const within7Days = ms < 7 * 24 * 60 * 60_000
+  if (within7Days) {
+    const weekday = d.toLocaleDateString(undefined, { weekday: "short" })
+    return `${weekday} ${time}`
+  }
+  const date = d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  })
+  return `${date} · ${time}`
+}
+
+function ArtifactsList({
+  laneId,
+  onJumpToStep,
+}: {
+  laneId: string | null
+  onJumpToStep?: (stepId: string) => void
+}) {
+  const [events, setEvents] = React.useState<TimelineEvent[]>([])
+  const [err, setErr] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (!laneId) {
+      setEvents([])
+      return
+    }
+    let alive = true
+    async function poll() {
+      try {
+        const r = await fetch(
+          `/api/operator-studio/work-lanes/${encodeURIComponent(laneId!)}/events`,
+          { cache: "no-store" }
+        )
+        if (!r.ok) return
+        const data = (await r.json()) as { events?: TimelineEvent[] }
+        if (alive) setEvents(Array.isArray(data.events) ? data.events : [])
+      } catch (e) {
+        if (alive) setErr(e instanceof Error ? e.message : "events fetch failed")
+      }
+    }
+    poll()
+    const id = window.setInterval(poll, 6_000)
+    return () => {
+      alive = false
+      window.clearInterval(id)
+    }
+  }, [laneId])
+
+  // Render-ready item list with bucket headers, jagged-tear gaps,
+  // singleton events, and family groups. Logic lives in
+  // `lib/operator-studio/cockpit-artifact-grouping.ts` so the
+  // acceptance script can drive it without React.
+  const items = buildArtifactItems(events, {
+    familyWindowMs: FAMILY_WINDOW_MS,
+    gapThresholdMs: GAP_THRESHOLD_MS,
+    bucketOf: timelineDayBucket,
+  })
+
+  if (!laneId) return null
+  return (
+    <div
+      className="flex flex-col flex-1 min-h-0 bg-white dark:bg-stone-900"
+      data-testid="cockpit-artifacts-list"
+    >
+      {err && (
+        <div className="px-3 py-1 text-[11px] text-red-500 border-b border-stone-200 dark:border-stone-800">
+          {err}
+        </div>
+      )}
+      <div className="overflow-y-auto flex-1">
+        {events.length === 0 ? (
+          <div className="text-[11px] text-stone-400 dark:text-stone-500 p-3">
+            Nothing here yet — pull a card in or create one and the
+            artifact will appear.
+          </div>
+        ) : (
+          <ul className="divide-y divide-stone-100 dark:divide-stone-800">
+            {items.map((it, i) =>
+              it.kind === "bucket" ? (
+                <li
+                  key={`bucket-${i}`}
+                  className="px-3 py-1 bg-stone-50 dark:bg-stone-950/60 text-[9px] uppercase tracking-wider text-stone-500 dark:text-stone-400 sticky top-0 z-10"
+                >
+                  {it.label}
+                </li>
+              ) : it.kind === "gap" ? (
+                <li
+                  key={`gap-${i}`}
+                  className="relative bg-stone-50/40 dark:bg-stone-950/30 py-1"
+                  aria-hidden
+                  data-testid="cockpit-artifacts-gap"
+                >
+                  <span
+                    className="absolute left-0 right-0 top-0 h-1.5"
+                    style={{
+                      background:
+                        "linear-gradient(45deg, transparent 33%, currentColor 33%, currentColor 50%, transparent 50%, transparent 83%, currentColor 83%, currentColor 100%)",
+                      backgroundSize: "8px 100%",
+                      color: "rgb(168 162 158 / 0.5)",
+                    }}
+                  />
+                  <div className="text-center text-[9px] uppercase tracking-wider text-stone-400 dark:text-stone-500 pt-1">
+                    {formatGapDuration(it.ms)}
+                  </div>
+                </li>
+              ) : it.kind === "group" ? (
+                <ArtifactGroupRow
+                  key={it.groupId}
+                  groupId={it.groupId}
+                  events={it.events}
+                  onJumpToStep={onJumpToStep}
+                />
+              ) : it.event.eventKind === "chat-burst" && it.event.chatBurst ? (
+                <ChatBurstRow key={it.event.id} event={it.event} />
+              ) : (
+                <SingleArtifactRow
+                  key={it.event.id}
+                  event={it.event}
+                  onJumpToStep={onJumpToStep}
+                />
+              )
+            )}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Tailwind colorway per event_kind. Extracted from the original inline
+// ternary so SingleArtifactRow and the group expanded rows share one
+// vocabulary — same kind, same chip color, every surface.
+function glyphChipClass(eventKind: string): string {
+  switch (eventKind) {
+    case "covered":
+      return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+    case "skipped":
+      return "bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400"
+    case "marked_in_motion":
+    case "started":
+      return "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+    case "removed_from_lane":
+      return "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+    default:
+      return "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+  }
+}
+
+function SingleArtifactRow({
+  event,
+  onJumpToStep,
+}: {
+  event: TimelineEvent
+  onJumpToStep?: (stepId: string) => void
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onJumpToStep?.(event.planStepId)}
+        className="w-full text-left px-3 py-2 hover:bg-stone-50 dark:hover:bg-stone-800/40 focus:bg-stone-100 dark:focus:bg-stone-800/60"
+        title={`${event.eventKind} · ${formatArtifactTime(event.at)}${
+          event.note ? `\n\n${event.note}` : ""
+        }`}
+        data-jump-to-step={event.planStepId}
+      >
+        <div className="flex items-start gap-2">
+          <span
+            className={`shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-[11px] font-mono ${glyphChipClass(event.eventKind)}`}
+            aria-hidden
+          >
+            {TIMELINE_GLYPH[event.eventKind] ?? "·"}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500 dark:text-stone-400 truncate">
+                {event.eventKind}
+              </span>
+              <span
+                className="text-[9px] text-stone-400 dark:text-stone-500 shrink-0 tabular-nums"
+                title={new Date(event.at).toLocaleString()}
+              >
+                {formatArtifactTime(event.at)}
+              </span>
+            </div>
+            <div className="text-[12px] text-stone-800 dark:text-stone-200 truncate">
+              {event.cardTitle ?? event.planStepId}
+            </div>
+            {event.note && (
+              <div className="text-[10px] text-stone-500 dark:text-stone-400 truncate italic">
+                {event.note}
+              </div>
+            )}
+          </div>
+        </div>
+      </button>
+    </li>
+  )
+}
+
+/**
+ * Synthetic chat-burst row — collapses every user/assistant/tool turn
+ * that happened in the gap between two adjacent real artifact events
+ * into one expandable pill. Tap to reveal the per-role breakdown and
+ * the burst's wall-clock span. Doctrine: David 2026-05-12 — "reflect
+ * chat turns themselves in the artifact log, batched and grouped under
+ * one element type to show the count of stuff that happened in between
+ * the creation of artifacts."
+ */
+function ChatBurstRow({ event }: { event: TimelineEvent }) {
+  const b = event.chatBurst
+  const [expanded, setExpanded] = React.useState(false)
+  if (!b) return null
+  const spanMs =
+    new Date(b.toAt).getTime() - new Date(b.fromAt).getTime()
+  const spanLabel =
+    spanMs < 60_000
+      ? `${Math.max(1, Math.round(spanMs / 1000))}s span`
+      : spanMs < 60 * 60_000
+        ? `${Math.round(spanMs / 60_000)}m span`
+        : `${Math.round(spanMs / (60 * 60_000))}h span`
+  return (
+    <li data-testid="cockpit-artifact-chat-burst">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full text-left px-3 py-2 hover:bg-stone-50 dark:hover:bg-stone-800/40 focus:bg-stone-100 dark:focus:bg-stone-800/60"
+        aria-expanded={expanded}
+        data-testid="cockpit-artifact-chat-burst-toggle"
+      >
+        <div className="flex items-start gap-2">
+          <span
+            className="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-[11px] font-mono bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+            aria-hidden
+          >
+            ↻
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500 dark:text-stone-400 truncate flex items-center gap-1.5">
+                <span>chat</span>
+                <span
+                  className="text-[10px] font-mono tracking-normal text-stone-400 dark:text-stone-500"
+                  data-testid="cockpit-artifact-chat-burst-count"
+                >
+                  × {b.turnCount} turn{b.turnCount === 1 ? "" : "s"}
+                </span>
+              </span>
+              <span
+                className="text-[9px] text-stone-400 dark:text-stone-500 shrink-0 tabular-nums flex items-center gap-1"
+                title={`${new Date(b.fromAt).toLocaleString()} → ${new Date(b.toAt).toLocaleString()}`}
+              >
+                <span>{formatArtifactTime(b.toAt)}</span>
+                <ChevronRight
+                  className={`h-3 w-3 transition-transform duration-150 ${
+                    expanded ? "rotate-90" : ""
+                  }`}
+                  aria-hidden
+                />
+              </span>
+            </div>
+            <div className="text-[11px] text-stone-600 dark:text-stone-300 truncate">
+              {b.userCount} you · {b.assistantCount} agent
+              {b.toolUseCount > 0 ? ` · ${b.toolUseCount} tool` : ""} ·{" "}
+              {spanLabel}
+            </div>
+          </div>
+        </div>
+      </button>
+      {expanded && (
+        <div
+          className="pl-10 pr-3 py-2 bg-stone-50/60 dark:bg-stone-950/40 text-[11px] text-stone-600 dark:text-stone-300"
+          data-testid="cockpit-artifact-chat-burst-expanded"
+        >
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+            <span>You</span>
+            <span className="tabular-nums text-right">{b.userCount}</span>
+            <span>Agent</span>
+            <span className="tabular-nums text-right">
+              {b.assistantCount}
+            </span>
+            <span>Tool calls</span>
+            <span className="tabular-nums text-right">{b.toolUseCount}</span>
+            <span>Thinking</span>
+            <span className="tabular-nums text-right">
+              {b.thinkingCount}
+            </span>
+          </div>
+          <div className="mt-1.5 text-[10px] text-stone-400 dark:text-stone-500">
+            {new Date(b.fromAt).toLocaleString()} →{" "}
+            {new Date(b.toAt).toLocaleString()}
+          </div>
+        </div>
+      )}
+    </li>
+  )
+}
+
+/**
+ * Family group row — ≥2 consecutive same-kind events within the same
+ * day-bucket and within FAMILY_WINDOW_MS. Collapsed: glyph + kind +
+ * "× N" + most-recent member's title as the preview line + caret.
+ * Tap expands inline into individual `SingleArtifactRow` rows so every
+ * event remains tappable and the audit trail stays intact. Expand
+ * state persists per group in localStorage.
+ */
+function ArtifactGroupRow({
+  groupId,
+  events,
+  onJumpToStep,
+}: {
+  groupId: string
+  events: TimelineEvent[]
+  onJumpToStep?: (stepId: string) => void
+}) {
+  const lsKey = ARTIFACT_GROUP_LS_PREFIX + groupId
+  const [expanded, setExpanded] = React.useState<boolean>(false)
+  React.useEffect(() => {
+    if (typeof window === "undefined") return
+    try {
+      if (window.localStorage.getItem(lsKey) === "1") setExpanded(true)
+    } catch {
+      /* ignore */
+    }
+  }, [lsKey])
+  const toggle = React.useCallback(() => {
+    setExpanded((prev) => {
+      const next = !prev
+      try {
+        if (typeof window !== "undefined") {
+          if (next) window.localStorage.setItem(lsKey, "1")
+          else window.localStorage.removeItem(lsKey)
+        }
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }, [lsKey])
+  // events list is most-recent-first, so events[0] is the most recent
+  // and its cardTitle is the natural preview ("what just happened in
+  // this burst"). Time-range label spans newest → oldest.
+  const head = events[0]
+  const tail = events[events.length - 1]
+  const kind = head.eventKind
+  const count = events.length
+  return (
+    <li data-testid="cockpit-artifact-group">
+      <button
+        type="button"
+        onClick={toggle}
+        className="w-full text-left px-3 py-2 hover:bg-stone-50 dark:hover:bg-stone-800/40 focus:bg-stone-100 dark:focus:bg-stone-800/60"
+        aria-expanded={expanded}
+        data-testid="cockpit-artifact-group-toggle"
+        data-group-id={groupId}
+      >
+        <div className="flex items-start gap-2">
+          <span
+            className={`shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-[11px] font-mono ${glyphChipClass(kind)}`}
+            aria-hidden
+          >
+            {TIMELINE_GLYPH[kind] ?? "·"}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500 dark:text-stone-400 truncate flex items-center gap-1.5">
+                <span>{kind}</span>
+                <span
+                  className="text-[10px] font-mono tracking-normal text-stone-400 dark:text-stone-500"
+                  data-testid="cockpit-artifact-group-count"
+                >
+                  × {count}
+                </span>
+              </span>
+              <span
+                className="text-[9px] text-stone-400 dark:text-stone-500 shrink-0 tabular-nums flex items-center gap-1"
+                title={`${new Date(tail.at).toLocaleString()} → ${new Date(head.at).toLocaleString()}`}
+              >
+                <span>{formatArtifactTime(head.at)}</span>
+                <ChevronRight
+                  className={`h-3 w-3 transition-transform duration-150 ${
+                    expanded ? "rotate-90" : ""
+                  }`}
+                  aria-hidden
+                  data-testid="cockpit-artifact-group-caret"
+                />
+              </span>
+            </div>
+            <div className="text-[12px] text-stone-800 dark:text-stone-200 truncate">
+              {head.cardTitle ?? head.planStepId}
+            </div>
+          </div>
+        </div>
+      </button>
+      {expanded && (
+        <ul
+          className="pl-4 border-l-2 border-stone-200/60 dark:border-stone-800/60 ml-3 divide-y divide-stone-100 dark:divide-stone-800"
+          data-testid="cockpit-artifact-group-expanded"
+        >
+          {events.map((e) => (
+            <SingleArtifactRow
+              key={e.id}
+              event={e}
+              onJumpToStep={onJumpToStep}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  )
 }

@@ -25,8 +25,10 @@ import { authorizeRequest, isAdmin } from "@/lib/operator-studio/auth"
 
 export const dynamic = "force-dynamic"
 
-// Match the cap used by lib/server/agent-bridge/app-control.ts so the
-// two image paths agree on what counts as "too big."
+// 10 MB raw base64 → ~7.5 MB binary. The CLI worker reads images
+// from filesystem paths (Bento composer inserts `[image: <path>]` into
+// the prompt draft), so this stash cap is just a guard against
+// runaway uploads — no relation to any clipboard / AX path.
 const IMAGE_BASE64_BYTE_CAP = 10 * 1024 * 1024
 
 export async function POST(req: NextRequest) {

@@ -21,6 +21,9 @@ import "server-only"
 import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm"
 
 import { computeReviewStatus } from "@/lib/operator-studio/review-status"
+import type { HumanReviewEquipment } from "@/lib/operator-studio/human-review-equipment"
+import { parseHumanReviewEquipment } from "@/lib/operator-studio/human-review-equipment"
+import { GLOBAL_WORKSPACE_ID } from "@/lib/operator-studio/workspaces"
 import {
   getAppSessionEntry,
   getAppSessionTail,
@@ -39,7 +42,12 @@ export type ThreadBindingSource =
   | "tail-sniff"
   | "scheduled"
 
-export type SpawnOrigin = "cockpit" | "recommendation" | "manual"
+export type SpawnOrigin =
+  | "cockpit"
+  | "cockpit-bypass"
+  | "recommendation"
+  | "manual"
+  | "cli-server"
 
 export interface ThreadCardBinding {
   id: string
@@ -67,6 +75,14 @@ export interface ThreadCardBinding {
   berthierReviewedAt: string | null
   /** ISO timestamp; non-null = David explicitly signed off. */
   humanApprovedAt: string | null
+  /** Per-feature human-review equipment spec the worker scoped on
+   *  task_done. Null until set. Drives which client component the
+   *  Subtelegento dev-instance mounts for the reviewer. */
+  humanReviewEquipment: HumanReviewEquipment | null
+  /** Where the session physically lives. Drives chat-send dispatch:
+   *  'claude-cli' / 'codex-cli' → CLI resume; 'desktop' is legacy AX
+   *  (no new rows should land with this value post 2026-05-12). */
+  surface: "claude-cli" | "codex-cli" | "desktop"
 }
 
 export interface UpsertThreadCardBindingInput {
@@ -85,6 +101,12 @@ export interface UpsertThreadCardBindingInput {
   spawnedByAgentId?: string | null
   spawnOrigin?: SpawnOrigin | null
   createdBy?: string | null
+  /** Where the session physically lives — drives the chat-send dispatch.
+   *  'claude-cli' / 'codex-cli' route through `claude --resume --print`
+   *  (or the Codex CLI equivalent). 'desktop' is the legacy AX clipboard
+   *  path, kept only as a column default for back-compat with pre-CLI
+   *  rows. New spawn paths MUST set this explicitly. */
+  surface?: "claude-cli" | "codex-cli" | "desktop"
 }
 
 function rowToBinding(row: typeof operatorThreadCardBindings.$inferSelect): ThreadCardBinding {
@@ -112,7 +134,49 @@ function rowToBinding(row: typeof operatorThreadCardBindings.$inferSelect): Thre
     humanApprovedAt: row.humanApprovedAt
       ? row.humanApprovedAt.toISOString()
       : null,
+    humanReviewEquipment: parseHumanReviewEquipment(row.humanReviewEquipment),
+    surface:
+      row.surface === "claude-cli" ||
+      row.surface === "codex-cli" ||
+      row.surface === "desktop"
+        ? row.surface
+        : "desktop",
   }
+}
+
+/**
+ * Persist a human-review-equipment spec on the active binding for
+ * (workspace, agent). Called by the task_done dispatcher when the
+ * worker's payload includes an equipment block. Idempotent — repeat
+ * calls overwrite. Returns true if a row was updated.
+ *
+ * The spec is parsed/validated before write — callers can pass raw
+ * unknown shapes from agent output without pre-validation.
+ */
+export async function setHumanReviewEquipment(
+  workspaceId: string,
+  agentId: string,
+  spec: HumanReviewEquipment
+): Promise<boolean> {
+  const validated = parseHumanReviewEquipment(spec)
+  if (!validated) return false
+  const db = getDb()
+  const now = new Date()
+  const updated = await db
+    .update(operatorThreadCardBindings)
+    .set({
+      humanReviewEquipment: validated,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(operatorThreadCardBindings.workspaceId, workspaceId),
+        eq(operatorThreadCardBindings.agentId, agentId),
+        isNull(operatorThreadCardBindings.detachedAt)
+      )
+    )
+    .returning({ id: operatorThreadCardBindings.id })
+  return updated.length > 0
 }
 
 /**
@@ -187,6 +251,7 @@ export async function upsertThreadCardBinding(
             input.spawnedByAgentId ?? row.spawnedByAgentId ?? null,
           spawnOrigin: input.spawnOrigin ?? row.spawnOrigin ?? null,
           planId: input.planId ?? row.planId ?? null,
+          surface: input.surface ?? row.surface ?? "claude-cli",
           updatedAt: now,
         })
         .where(eq(operatorThreadCardBindings.id, row.id))
@@ -216,12 +281,174 @@ export async function upsertThreadCardBinding(
       sourceRecommendationId: input.sourceRecommendationId ?? null,
       spawnedByAgentId: input.spawnedByAgentId ?? null,
       spawnOrigin: input.spawnOrigin ?? null,
+      surface: input.surface ?? "claude-cli",
       createdBy: input.createdBy ?? null,
       createdAt: now,
       updatedAt: now,
     })
     .returning()
   return rowToBinding(inserted[0])
+}
+
+/**
+ * Server-side dispatcher for an assistant turn that may contain a
+ * `task_done` sentinel + an optional `human-review-equipment` block.
+ * Persists the equipment on the active binding if a block was
+ * present and parsed. Returns whether the sentinel matched and
+ * whether equipment was persisted, so callers (e.g. a future
+ * task_done watcher) can fire additional side-effects (thread-done
+ * stamping, notifier, etc.).
+ *
+ * Pure-parser + persistence split: parsing lives in
+ * `power-strings.ts#parseTaskDonePayload`; this function is the
+ * thin DB wrapper that closes the loop.
+ */
+/** Test seam for the ephemeral-deployment provisioner trigger (W4).
+ *  Defaults to lazily importing the real `provisionEphemeralDeployment`
+ *  from `app-runner-provisioner.ts`. Acceptance scripts inject a mock
+ *  so we never touch AWS. The function is invoked only when:
+ *    - task_done sentinel matched
+ *    - equipment was persisted on the binding
+ *    - reverse lookup agentId→adoWorkItemId succeeded
+ *  The kill-switch lives inside the real provisioner; tests bypass it
+ *  by injecting a mock that always succeeds. */
+export type EphemeralDeploymentTrigger = (input: {
+  workspaceId: string
+  agentId: string
+  adoWorkItemId: number
+  equipment: HumanReviewEquipment
+}) => Promise<{ ok: boolean; deeplinkUrl?: string; error?: string }>
+
+let ephemeralDeploymentTrigger: EphemeralDeploymentTrigger | null = null
+
+export function __setEphemeralDeploymentTriggerForTest(
+  fn: EphemeralDeploymentTrigger | null
+): void {
+  ephemeralDeploymentTrigger = fn
+}
+
+async function defaultEphemeralDeploymentTrigger(input: {
+  workspaceId: string
+  agentId: string
+  adoWorkItemId: number
+  equipment: HumanReviewEquipment
+}): Promise<{ ok: boolean; deeplinkUrl?: string; error?: string }> {
+  // Lazy import — the AWS SDK clients pull in heavy code we don't want
+  // resident in modules that import thread-card-bindings.
+  try {
+    const { provisionEphemeralDeployment } = await import(
+      "./app-runner-provisioner"
+    )
+    const requestId = `req-${input.adoWorkItemId}-${Date.now()}`
+    // Caller-supplied image tag is not known here; in production a
+    // sibling card resolves this from the worker's task_done payload.
+    // For now we fall through to whatever the worker emits in the
+    // env-var equipment block.
+    const res = await provisionEphemeralDeployment({
+      requestId,
+      imageTag: input.equipment.envVars?.TELEGENTO_PREVIEW_IMAGE_TAG ?? "latest",
+      // Real prod ECR repo is `telegento` (single segment). The
+      // `telegento/v4` assumption came from `step-C-pipeline-E-deploy-target`
+      // doc-side aspiration that never actually landed. AWS audit
+      // 2026-05-11 confirmed the live repo name. Override via env
+      // if a future sibling eval repo is created.
+      ecrRepositoryName:
+        process.env.TELEGENTO_EVAL_ECR_REPO ?? "telegento",
+      ephemeralShardName: `eph_${requestId}`,
+      workerTaskDoneSummary: `task_done from ${input.agentId}`,
+      humanReviewEquipment: input.equipment,
+    })
+    return { ok: true, deeplinkUrl: res.deeplinkUrl }
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+export async function applyTaskDonePayload(
+  workspaceId: string,
+  agentId: string,
+  role: string,
+  content: string
+): Promise<{
+  matched: boolean
+  equipmentPersisted: boolean
+  ticketId: number | null
+  artifactsRecorded: number
+  provisionerFired: boolean
+  provisionerOk: boolean | null
+}> {
+  const { parseTaskDonePayload } = await import("./power-strings")
+  const { recordArtifactSafe } = await import("./factory-loop-artifacts")
+  const { getTicketIdForAgent } = await import(
+    "./ado-ticket-worker-bindings"
+  )
+  const { matched, equipment } = parseTaskDonePayload(role, content)
+  let equipmentPersisted = false
+  if (equipment) {
+    equipmentPersisted = await setHumanReviewEquipment(
+      workspaceId,
+      agentId,
+      equipment
+    )
+  }
+  const ticketId = matched
+    ? getTicketIdForAgent(workspaceId, agentId)
+    : null
+  let artifactsRecorded = 0
+  let provisionerFired = false
+  let provisionerOk: boolean | null = null
+
+  if (matched && ticketId !== null) {
+    const r = await recordArtifactSafe({
+      workspaceId,
+      adoWorkItemId: ticketId,
+      eventKind: "worker-task-done",
+      eventPayload: {
+        agentId,
+        contentPreview: content.slice(0, 4000),
+        equipment: equipment ?? null,
+        matchedSpecId: matched.id,
+      },
+    })
+    if (r) artifactsRecorded += 1
+
+    if (equipment) {
+      const trigger =
+        ephemeralDeploymentTrigger ?? defaultEphemeralDeploymentTrigger
+      provisionerFired = true
+      const provisionRes = await trigger({
+        workspaceId,
+        agentId,
+        adoWorkItemId: ticketId,
+        equipment,
+      })
+      provisionerOk = provisionRes.ok
+      const r2 = await recordArtifactSafe({
+        workspaceId,
+        adoWorkItemId: ticketId,
+        eventKind: "deployment-provisioned",
+        eventPayload: {
+          agentId,
+          ok: provisionRes.ok,
+          deeplinkUrl: provisionRes.deeplinkUrl ?? null,
+          error: provisionRes.error ?? null,
+          equipmentKind: equipment.kind,
+        },
+      })
+      if (r2) artifactsRecorded += 1
+    }
+  }
+  return {
+    matched: matched !== null,
+    equipmentPersisted,
+    ticketId,
+    artifactsRecorded,
+    provisionerFired,
+    provisionerOk,
+  }
 }
 
 /**
@@ -449,10 +676,56 @@ export async function setHumanApprovedAt(
  *
  * Returns the count of bindings that were detached this call.
  */
+export interface AutoDetachOptions {
+  /**
+   * Escape hatch for legitimate prod ops + opted-in test scripts.
+   * Bypasses the min-threshold and global-workspace-from-script guards.
+   * Tests on synthetic workspaces still must pass this if their
+   * threshold is below 5min, since the threshold check is unconditional.
+   */
+  unsafeAllowProduction?: boolean
+}
+
+const AUTO_DETACH_MIN_THRESHOLD_MS = 5 * 60_000
+
+function isCalledFromAcceptanceScript(): boolean {
+  const argv1 = typeof process !== "undefined" ? process.argv?.[1] ?? "" : ""
+  return argv1.includes("/scripts/") || argv1.includes("acceptance")
+}
+
 export async function autoDetachStaleReadyWorkers(
   workspaceId: string,
-  thresholdMs: number = 24 * 60 * 60_000
+  thresholdMs: number = 24 * 60 * 60_000,
+  opts: AutoDetachOptions = {}
 ): Promise<number> {
+  const override = opts.unsafeAllowProduction === true
+
+  // Guard 1: minimum threshold. The 2026-05-10 incident was a test
+  // script invoking with threshold=0 against the production workspace,
+  // sweeping every in-flight worker. A sub-5min threshold has no
+  // legitimate production use.
+  if (
+    !override &&
+    (!Number.isFinite(thresholdMs) || thresholdMs < AUTO_DETACH_MIN_THRESHOLD_MS)
+  ) {
+    throw new Error(
+      "auto-detach threshold below 5min is unsafe; would detach in-flight workers. Pass { unsafeAllowProduction: true } from a test on a synthetic workspace to override."
+    )
+  }
+
+  // Guard 2: belt-and-suspenders — refuse to operate on the production
+  // GLOBAL workspace from any process whose argv looks like a script
+  // or acceptance harness.
+  if (
+    !override &&
+    workspaceId === GLOBAL_WORKSPACE_ID &&
+    isCalledFromAcceptanceScript()
+  ) {
+    throw new Error(
+      "auto-detach refuses to run against the GLOBAL production workspace from a script/acceptance path. Use a synthetic workspace, or pass { unsafeAllowProduction: true } if this is a sanctioned prod op."
+    )
+  }
+
   if (!Number.isFinite(thresholdMs) || thresholdMs <= 0) return 0
   const active = await listActiveThreadCardBindings(workspaceId)
   if (active.length === 0) return 0

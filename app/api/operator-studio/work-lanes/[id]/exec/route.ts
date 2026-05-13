@@ -2,12 +2,21 @@
  * POST /api/operator-studio/work-lanes/[id]/exec
  *   body: { agentId, agentKind? }   → set/promote existing thread as exec
  *   body: { agentId: null }         → clear exec
- *   body: { action: "create-new", initialPlanStepId?, initialChatId? }
- *                                   → spawn a fresh Claude Desktop session
- *                                     hydrated with the canonical Berthier
- *                                     kickoff for this lane, then bind it.
+ *   body: { action: "create-new", initialPlanStepId?, initialChatId?, appKind?, model? }
+ *   body: { create: true, appKind?: "claude"|"codex", initialPlanStepId?, initialChatId? }
+ *                                   → spawn a fresh exec session via the
+ *                                     CLI surface dispatcher
+ *                                     (`claude-cli` default, `codex-cli`
+ *                                     when appKind = "codex"), hydrated
+ *                                     with the canonical Berthier
+ *                                     kickoff for this lane, then bound.
  *   → 200 { ok: true, lane }
  *   → 409 when role-conflict guard rejects
+ *
+ * CLI-only as of 2026-05-12. The retired Claude/Codex Desktop AX spawn
+ * branch was removed in the same migration that flipped `bindings.surface`
+ * default to `claude-cli`. Legacy Desktop threads remain participable
+ * via the chat-send route's CLI-resume path.
  */
 
 import { NextResponse, type NextRequest } from "next/server"
@@ -18,9 +27,14 @@ import {
   getWorkLane,
   LaneExecConflictError,
 } from "@/lib/operator-studio/work-lanes"
-import { buildBerthierKickoff } from "@/lib/operator-studio/berthier-kickoff"
-import { createNewAppSessionAndSend } from "@/lib/server/agent-bridge/app-new-session"
+import { buildKickoffForFactory } from "@/lib/operator-studio/berthier-flavors"
+import { getFactoryById } from "@/lib/operator-studio/factory-registry"
+import { upsertThreadCardBinding } from "@/lib/operator-studio/thread-card-bindings"
+import { getActiveWorkspaceId } from "@/lib/operator-studio/workspaces"
 import { isHotModeArmed } from "@/lib/server/agent-bridge/hot-mode"
+import { spawnAgent } from "@/lib/server/agent-bridge/surfaces"
+import { DEFAULT_EXEC_MODEL } from "@/lib/server/agent-bridge/surfaces/claude-cli"
+import type { SurfaceKind } from "@/lib/server/agent-bridge/surfaces/types"
 import { parseAgentId } from "@/lib/server/agent-bridge/types"
 
 export const dynamic = "force-dynamic"
@@ -43,11 +57,23 @@ export async function POST(
     agentId?: string | null
     agentKind?: string
     action?: string
+    create?: boolean
+    appKind?: string
+    /** Model id for CLI surfaces. Defaults to DEFAULT_EXEC_MODEL when
+     *  omitted. Honored only by claude-cli; codex-cli reads from env. */
+    model?: string
     initialPlanStepId?: string | null
     initialChatId?: string | null
+    /** Optional factory id to drive flavor selection. When set, the
+     *  kickoff is built via the factory's flavor (`buildKickoffForFactory`);
+     *  otherwise the canonical Berthier kickoff is used. */
+    factoryId?: string | null
   } | null
 
-  if (body && body.action === "create-new") {
+  const isCreateNew =
+    !!body && (body.action === "create-new" || body.create === true)
+
+  if (isCreateNew) {
     if (!(await isAdmin(auth))) {
       return NextResponse.json({ error: "admin only" }, { status: 403 })
     }
@@ -60,17 +86,32 @@ export async function POST(
         { status: 403 }
       )
     }
-    const kickoff = buildBerthierKickoff({
+    const appKindRaw = body?.appKind?.trim().toLowerCase()
+    const agentKind: "claude" | "codex" =
+      appKindRaw === "codex" ? "codex" : "claude"
+    const surface: SurfaceKind =
+      agentKind === "codex" ? "codex-cli" : "claude-cli"
+    const factoryEntry = getFactoryById(body?.factoryId ?? null)
+    const kickoff = buildKickoffForFactory({
       laneId: lane.id,
       laneName: lane.name,
       workspaceId: lane.workspaceId,
-      initialPlanStepId: body.initialPlanStepId ?? null,
-      initialChatId: body.initialChatId ?? null,
+      factoryEntry,
+      initialPlanStepId: body?.initialPlanStepId ?? null,
+      initialChatId: body?.initialChatId ?? null,
     })
-    const result = await createNewAppSessionAndSend({
-      appKind: "claude",
+
+    const model =
+      typeof body?.model === "string" && body.model.trim().length > 0
+        ? body.model.trim()
+        : agentKind === "claude"
+          ? DEFAULT_EXEC_MODEL
+          : undefined
+
+    const result = await spawnAgent({
+      surface,
+      model,
       prompt: kickoff,
-      submit: true,
     })
     if (!result.ok) {
       return NextResponse.json(
@@ -82,21 +123,53 @@ export async function POST(
       return NextResponse.json(
         {
           error:
-            "Session spawned but JSONL did not reconcile in time. Re-run once the new chat appears.",
+            "CLI session spawned but JSONL did not reconcile in time. Check /tmp/operator-studio-cli-spawns/ and retry.",
           launchedAt: result.launchedAt,
         },
         { status: 504 }
       )
     }
+
+    // Persist the exec binding with the CLI surface tag so the
+    // chat-send route dispatches via `claude --resume`, not AX paste.
+    try {
+      const workspaceId = await getActiveWorkspaceId()
+      const initialPlanStepId =
+        body?.initialPlanStepId && body.initialPlanStepId.trim().length > 0
+          ? body.initialPlanStepId
+          : lane.id
+      await upsertThreadCardBinding({
+        workspaceId,
+        agentId: result.agentId,
+        agentKind,
+        planStepId: initialPlanStepId,
+        source: "launch",
+        spawnOrigin: "cockpit",
+        surface,
+        createdBy: auth.identity ?? null,
+        rationale: "lane exec create-new (CLI surface)",
+      })
+    } catch (e) {
+      console.warn(
+        "[exec] exec-binding upsert failed (non-fatal):",
+        e instanceof Error ? e.message : e
+      )
+    }
+
     try {
       const updated = await setLaneExec(id, {
         agentId: result.agentId,
-        agentKind: "claude",
+        agentKind,
       })
       return NextResponse.json({
         ok: true,
         lane: updated,
-        spawned: { agentId: result.agentId, launchedAt: result.launchedAt },
+        spawned: {
+          agentId: result.agentId,
+          launchedAt: result.launchedAt,
+          model: model ?? null,
+          surface,
+        },
       })
     } catch (err) {
       if (err instanceof LaneExecConflictError) {

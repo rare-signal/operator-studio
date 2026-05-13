@@ -37,10 +37,6 @@ import type {
   OperationsRecommendation,
   OperationsWorker,
 } from "@/lib/operator-studio/operations"
-import type {
-  LaunchWaveLedger,
-  LaunchWaveRecord,
-} from "@/lib/operator-studio/launch-waves"
 
 /**
  * Operations — executive control loop.
@@ -81,8 +77,6 @@ export function OperationsDesk({
   initialKb = [],
 }: OperationsDeskProps) {
   const [view, setView] = React.useState<OperationsControlLoopView | null>(null)
-  const [launchWaveLedger, setLaunchWaveLedger] =
-    React.useState<LaunchWaveLedger | null>(null)
   const [pollAt, setPollAt] = React.useState<string | null>(null)
   const [pollError, setPollError] = React.useState<string | null>(null)
   const [manualLinks, setManualLinks] = React.useState<Record<string, string>>(
@@ -155,11 +149,9 @@ export function OperationsDesk({
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = (await res.json()) as {
           view: OperationsControlLoopView
-          launchWaveLedger?: LaunchWaveLedger
         }
         if (cancelled) return
         setView(data.view)
-        setLaunchWaveLedger(data.launchWaveLedger ?? null)
         setPollAt(new Date().toISOString())
         setPollError(null)
       } catch (e) {
@@ -240,8 +232,6 @@ export function OperationsDesk({
         {view && view.unboundWorkers.length > 0 && (
           <UnboundLane workers={view.unboundWorkers} />
         )}
-
-        {launchWaveLedger && <LaunchWaveSection ledger={launchWaveLedger} />}
 
         {view && view.floatingRecommendations.length > 0 && (
           <FloatingRecs recs={view.floatingRecommendations} />
@@ -1074,93 +1064,6 @@ function UnboundLane({ workers }: { workers: OperationsWorker[] }) {
         ))}
       </ul>
     </section>
-  )
-}
-
-function LaunchWaveSection({ ledger }: { ledger: LaunchWaveLedger }) {
-  const sourceSummary =
-    ledger.totals.sourceCounts.length > 0
-      ? ledger.totals.sourceCounts
-          .map((s) => `${s.source} ${s.count}${s.active ? `/${s.active} live` : ""}`)
-          .join(" · ")
-      : "no sources yet"
-  return (
-    <section className="rounded-md border border-stone-200 dark:border-stone-800 bg-white/40 dark:bg-stone-950/40 p-3 sm:p-4">
-      <header className="flex items-center gap-2 mb-2 flex-wrap">
-        <Workflow className="h-3.5 w-3.5 text-stone-500" />
-        <h2 className="text-[13px] font-semibold tracking-tight">
-          Launch waves
-        </h2>
-        <span className="text-[10.5px] text-stone-500 dark:text-stone-400">
-          {ledger.totals.waves} wave{ledger.totals.waves === 1 ? "" : "s"} ·{" "}
-          {ledger.totals.launches} launch fact
-          {ledger.totals.launches === 1 ? "" : "s"} · {sourceSummary}
-        </span>
-      </header>
-
-      {ledger.emptyState ? (
-        <p className="text-[12px] text-stone-500 dark:text-stone-400">
-          <span className="font-medium text-stone-700 dark:text-stone-300">
-            {ledger.emptyState.title}.
-          </span>{" "}
-          {ledger.emptyState.body}
-        </p>
-      ) : (
-        <ul className="space-y-2">
-          {ledger.waves.slice(0, 6).map((wave) => (
-            <LaunchWaveRow key={wave.id} wave={wave} />
-          ))}
-        </ul>
-      )}
-      {!ledger.emptyState && ledger.waves.length > 6 && (
-        <p className="mt-2 text-[10.5px] text-stone-500 dark:text-stone-400">
-          + {ledger.waves.length - 6} more wave
-          {ledger.waves.length - 6 === 1 ? "" : "s"} in the shared operations
-          payload.
-        </p>
-      )}
-    </section>
-  )
-}
-
-function LaunchWaveRow({ wave }: { wave: LaunchWaveRecord }) {
-  const sources = wave.sourceCounts
-    .map((s) => `${s.source} ${s.count}${s.active ? `/${s.active} live` : ""}`)
-    .join(" · ")
-  const statuses = Object.entries(wave.statuses)
-    .filter(([, count]) => count > 0)
-    .map(([status, count]) => `${status} ${count}`)
-    .join(" · ")
-  return (
-    <li className="rounded-md border border-stone-200/70 dark:border-stone-800/70 bg-stone-50/40 dark:bg-stone-900/30 px-3 py-2">
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[12px] font-medium text-stone-900 dark:text-stone-100">
-          {wave.id}
-        </span>
-        <span className="text-[10.5px] text-stone-500 dark:text-stone-400">
-          {sources || "no sources"} {statuses ? `· ${statuses}` : ""}
-        </span>
-      </div>
-      {wave.boundCards.length > 0 ? (
-        <ul className="mt-1 space-y-0.5">
-          {wave.boundCards.slice(0, 3).map((card) => (
-            <li
-              key={card.planStepId}
-              className="text-[11.5px] text-stone-600 dark:text-stone-400 truncate"
-            >
-              <span className="font-mono text-[10.5px] text-stone-400 dark:text-stone-600">
-                {card.planStepId}
-              </span>
-              {card.planStepTitle ? ` — ${card.planStepTitle}` : ""}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="mt-1 text-[11.5px] text-stone-400 dark:text-stone-600">
-          No bound cards in this wave yet.
-        </p>
-      )}
-    </li>
   )
 }
 

@@ -7,8 +7,6 @@ import { listTmuxSessions } from "@/lib/server/agent-bridge/tmux"
 import type { AgentListItem } from "@/lib/server/agent-bridge/types"
 
 import { listExecutiveRecommendations } from "./executive-recommendations"
-import { listLaunchAttempts } from "./launch-attempts"
-import { summarizeLaunchWaves, type LaunchWaveLedger } from "./launch-waves"
 import {
   deriveOperationsControlLoop,
   type OperationsControlLoopView,
@@ -25,7 +23,6 @@ export interface BuildOperationsPayloadOptions {
 
 export interface OperationsPayload {
   view: OperationsControlLoopView
-  launchWaveLedger: LaunchWaveLedger
   fetchedAt: string
 }
 
@@ -95,7 +92,6 @@ export async function buildOperationsPayload(
     durableBindings,
     recommendations,
     reviewItems,
-    launchAttempts,
   ] = await Promise.all([
     loadActivePlan(opts.workspaceId, opts.planId ?? null).catch(() => null),
     buildAgents(),
@@ -108,7 +104,6 @@ export async function buildOperationsPayload(
     listReviewItems(opts.workspaceId, { includeClosed: false, limit: 100 }).catch(
       () => []
     ),
-    listLaunchAttempts({ status: "all", limit: 100 }).catch(() => []),
   ])
 
   const durableLinks: Record<string, { stepId: string; planId: string | null }> =
@@ -129,17 +124,9 @@ export async function buildOperationsPayload(
     recommendations,
     reviewItems: filteredReviewItems,
   })
-  const launchWaveLedger = summarizeLaunchWaves({
-    agents,
-    recent,
-    bindings: durableBindings,
-    launchAttempts,
-    planSteps: activePlan?.steps ?? [],
-  })
 
   return {
     view,
-    launchWaveLedger,
     fetchedAt: new Date().toISOString(),
   }
 }

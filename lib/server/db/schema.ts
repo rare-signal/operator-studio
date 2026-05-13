@@ -11,6 +11,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
   text,
   timestamp,
@@ -1039,6 +1040,26 @@ export const operatorThreadCardBindings = pgTable(
     humanApprovedAt: timestamp("human_approved_at", {
       withTimezone: true,
     }),
+    /** Per-feature human-review equipment spec the worker scoped on
+     *  task_done (0037). Drives which client component the dev-
+     *  instance mounts so the reviewer has the right affordance.
+     *  Shape: `HumanReviewEquipment` in
+     *  `lib/operator-studio/human-review-equipment.ts`. Null when
+     *  the worker hasn't scoped equipment yet. */
+    humanReviewEquipment: jsonb("human_review_equipment").$type<
+      import("@/lib/operator-studio/human-review-equipment").HumanReviewEquipment
+    >(),
+    /** Tier marker: 'exec' | 'worker' | 'marshal' (0042). Drives which
+     *  pane the binding renders in. Default 'worker' for legacy rows. */
+    role: text("role").notNull().default("worker"),
+    /** Where the session lives. Values: 'claude-cli' | 'codex-cli' |
+     *  'desktop' (legacy, kept for back-compat with pre-2026-05-12 rows
+     *  whose JSONLs were originally created via the retired Claude/Codex
+     *  Desktop AX path). Send-route dispatches CLI-resume for ALL claude
+     *  sessions today — the surface column is now mostly informational,
+     *  but kept so the cockpit can flag "this thread was born inside
+     *  Claude Desktop." Default flipped to 'claude-cli' in 0044. */
+    surface: text("surface").notNull().default("claude-cli"),
   },
   // The migration also creates a partial unique index on
   // (workspace_id, agent_id) WHERE detached_at IS NULL — drizzle's
@@ -1050,6 +1071,7 @@ export const operatorThreadCardBindings = pgTable(
     index("idx_op_thread_bindings_workspace").on(t.workspaceId),
     index("idx_op_thread_bindings_agent").on(t.workspaceId, t.agentId),
     index("idx_op_thread_bindings_spawned_by").on(t.workspaceId, t.spawnedByAgentId),
+    index("idx_op_thread_bindings_role").on(t.workspaceId, t.role),
   ]
 )
 
@@ -1105,6 +1127,69 @@ export const operatorWorkLaneMembership = pgTable(
   (t) => [
     index("idx_op_work_lane_membership_lane").on(t.laneId),
     index("idx_op_work_lane_membership_member").on(t.memberKind, t.memberId),
+  ]
+)
+
+// ─── Lane lifecycle event stream — temporal tagging for the cockpit ───────
+//
+// Every state transition that touches a card-in-a-lane writes a row here.
+// Powers the horizontal timeline sidebar (`step-cockpit-horizontal-timeline-view`)
+// and answers "what did we just do / what's next" without forcing the
+// operator to reconstruct it from chat scrollback. The doctrine is in
+// `memory/feedback_cockpit_is_execution_layer.md` — read that first.
+//
+// event_kind values (extensible; no DB-side enum so new kinds don't need
+// migrations): `pulled_in`, `created_in_lane`, `started`, `marked_in_motion`,
+// `covered`, `skipped`, `removed_from_lane`, `note`.
+export const operatorWorkLaneCardEvents = pgTable(
+  "operator_work_lane_card_events",
+  {
+    id: text("id").primaryKey(),
+    laneId: text("lane_id")
+      .notNull()
+      .references(() => operatorWorkLanes.id, { onDelete: "cascade" }),
+    planStepId: text("plan_step_id").notNull(),
+    eventKind: text("event_kind").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull(),
+    actorAgentId: text("actor_agent_id"),
+    note: text("note"),
+  },
+  (t) => [
+    index("idx_op_lane_card_events_lane").on(t.laneId),
+    index("idx_op_lane_card_events_lane_at").on(t.laneId, t.at),
+    index("idx_op_lane_card_events_card").on(t.planStepId),
+  ]
+)
+
+// ─── Marshal config — per-lane "field commander" agent (0041) ─────────────
+//
+// One Marshal per lane (server-enforced — agentId is PK, lane_id FK).
+// Marshal is a new tier between the lane's exec (Berthier) and the
+// spawned workers. Doctrine + behavior live in
+// `lib/operator-studio/marshal.ts`. Cost ceiling enforces guardrails on
+// the optional auto-AI scheduler — see `tickAutoAiMarshals`.
+
+export const operatorMarshalConfig = pgTable(
+  "operator_marshal_config",
+  {
+    agentId: text("agent_id").primaryKey(),
+    laneId: text("lane_id")
+      .notNull()
+      .references(() => operatorWorkLanes.id, { onDelete: "cascade" }),
+    /** 'manual' (operator tap only) | 'auto-ai' (scheduled passes). */
+    profile: text("profile").notNull(),
+    rubric: text("rubric"),
+    intervalMinutes: integer("interval_minutes"),
+    lastPassAt: timestamp("last_pass_at", { withTimezone: true }),
+    nextPassAt: timestamp("next_pass_at", { withTimezone: true }),
+    costCeilingUsdPerDay: numeric("cost_ceiling_usd_per_day").notNull().default("5.00"),
+    costSpentUsdToday: numeric("cost_spent_usd_today").notNull().default("0"),
+    costWindowStartedAt: timestamp("cost_window_started_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("idx_marshal_config_lane").on(t.laneId),
+    index("idx_marshal_config_next_pass").on(t.nextPassAt),
   ]
 )
 
@@ -1279,6 +1364,8 @@ export const schema = {
   operatorCockpitExecs,
   operatorWorkLanes,
   operatorWorkLaneMembership,
+  operatorWorkLaneCardEvents,
+  operatorMarshalConfig,
   operatorOutboxMessages,
   softwareFactories,
   operatorInboxEvents,
