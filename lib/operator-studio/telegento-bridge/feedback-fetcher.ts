@@ -71,12 +71,15 @@ function extractRows(json: unknown): unknown[] {
   if (Array.isArray(json)) return json
   if (json && typeof json === "object") {
     const obj = json as Record<string, unknown>
+    // Worker E's Telegento route returns { pending: [...] }; the other
+    // keys stay accepted for forward-compat if the API shape evolves.
+    if (Array.isArray(obj.pending)) return obj.pending
     if (Array.isArray(obj.rows)) return obj.rows
     if (Array.isArray(obj.feedback)) return obj.feedback
     if (Array.isArray(obj.data)) return obj.data
   }
   throw new Error(
-    "fetchPendingFeedback: unexpected response shape — expected an array or { rows: [] }"
+    "fetchPendingFeedback: unexpected response shape — expected an array or { pending: [] } | { rows: [] }"
   )
 }
 
