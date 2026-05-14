@@ -88,19 +88,35 @@ function normalize(raw: unknown): TelegentoFeedbackRow {
     throw new Error("fetchPendingFeedback: row is not an object")
   }
   const r = raw as Record<string, unknown>
+  // Worker E's response nests known-issue maturity fields under `issue`.
+  // Fall back to flat keys for forward-compat in case the route flattens.
+  const issue =
+    r.issue && typeof r.issue === "object"
+      ? (r.issue as Record<string, unknown>)
+      : {}
   return {
     id: asString(r.id, "id"),
     knownIssueId: asString(r.knownIssueId ?? r.known_issue_id, "knownIssueId"),
     knownIssueTitle: asString(
-      r.knownIssueTitle ?? r.known_issue_title,
+      issue.title ?? r.knownIssueTitle ?? r.known_issue_title,
       "knownIssueTitle"
     ),
-    currentVersion: asOptString(r.currentVersion ?? r.current_version),
-    requestedByName: asOptString(r.requestedByName ?? r.requested_by_name),
-    requestedByAdoId: asOptInt(r.requestedByAdoId ?? r.requested_by_ado_id),
-    feedbackPrompt: asOptString(r.feedbackPrompt ?? r.feedback_prompt),
+    currentVersion: asOptString(
+      issue.currentVersion ?? r.currentVersion ?? r.current_version
+    ),
+    requestedByName: asOptString(
+      issue.requestedByName ?? r.requestedByName ?? r.requested_by_name
+    ),
+    requestedByAdoId: asOptInt(
+      issue.requestedByAdoId ?? r.requestedByAdoId ?? r.requested_by_ado_id
+    ),
+    feedbackPrompt: asOptString(
+      issue.feedbackPrompt ?? r.feedbackPrompt ?? r.feedback_prompt
+    ),
     feedbackTargetVersion: asOptString(
-      r.feedbackTargetVersion ?? r.feedback_target_version
+      issue.feedbackTargetVersion ??
+        r.feedbackTargetVersion ??
+        r.feedback_target_version
     ),
     submittedByEmail: asString(
       r.submittedByEmail ?? r.submitted_by_email,
@@ -110,7 +126,9 @@ function normalize(raw: unknown): TelegentoFeedbackRow {
       r.submittedBySub ?? r.submitted_by_sub,
       "submittedBySub"
     ),
-    pageScope: asOptString(r.pageScope ?? r.page_scope),
+    pageScope: asOptString(
+      r.pageScope ?? r.page_scope ?? issue.pageScope
+    ),
     verdict: asVerdict(r.verdict),
     notes: asString(r.notes ?? "", "notes"),
     submittedAt: asString(r.submittedAt ?? r.submitted_at, "submittedAt"),
